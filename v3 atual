@@ -1,0 +1,105 @@
+function montarNovasCarteiras() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const abaAntes = ss.getSheetByName("Antes");
+  const abaDepois = ss.getSheetByName("Depois");
+  
+  const ui = SpreadsheetApp.getUi();
+  const resposta = ui.prompt("Montagem de Carteira", "Quantas novas carteiras você deseja montar?", ui.ButtonSet.OK_CANCEL);
+  
+  if (resposta.getSelectedButton() !== ui.Button.OK) return;
+  const numNovas = parseInt(resposta.getResponseText());
+  if (isNaN(numNovas) || numNovas <= 0) {
+    ui.alert("Por favor, insira um número válido.");
+    return;
+  }
+
+  const dadosAntes = abaAntes.getDataRange().getValues();
+  const cabecalho = dadosAntes[0];
+  const clientes = dadosAntes.slice(1);
+  
+  const idxId = cabecalho.indexOf("ID Original");
+  const idxCliente = cabecalho.indexOf("Cliente");
+  const idxFase = cabecalho.indexOf("Fase");
+  const idxMRR = cabecalho.indexOf("MRR");
+  const idxCS = cabecalho.indexOf("CS");
+
+  // Identificar analistas
+  const analistasAtuais = [...new Set(clientes.map(c => c[idxCS]).filter(cs => cs !== ""))];
+  const novosAnalistas = Array.from({length: numNovas}, (_, i) => `Analista ${i + 1}`);
+  const todosAnalistas = [...analistasAtuais, ...novosAnalistas];
+  const totalAnalistas = todosAnalistas.length;
+
+  // 1. Agrupar clientes por Fase para garantir os 10/15/20/55%
+  const fases = ["Mayday", "Alert", "En Route", "Flying"];
+  let clientesPorFase = {};
+  fases.forEach(f => clientesPorFase[f] = []);
+  
+  clientes.forEach(c => {
+    let f = c[idxFase];
+    if (clientesPorFase[f]) clientesPorFase[f].push(c);
+  });
+
+  let distribuicaoFinal = [];
+  let resumoStats = {};
+  todosAnalistas.forEach(nome => {
+    resumoStats[nome] = { mayday: 0, alert: 0, enroute: 0, flying: 0, total: 0, mrr: 0 };
+  });
+
+  // 2. Distribuir cada fase usando a lógica "Serpente" (Snake)
+  let globalIndex = 0; 
+
+  fases.forEach(faseNome => {
+    // Ordenar clientes da fase pelo MRR (Maior -> Menor)
+    let lista = clientesPorFase[faseNome].sort((a, b) => b[idxMRR] - a[idxMRR]);
+    
+    lista.forEach((cliente) => {
+      // Cálculo do índice serpente
+      let turno = Math.floor(globalIndex / totalAnalistas);
+      let direcaoId = globalIndex % totalAnalistas;
+      let analistaIdx = (turno % 2 === 0) ? direcaoId : (totalAnalistas - 1 - direcaoId);
+      
+      const analistaDesignado = todosAnalistas[analistaIdx];
+
+      // Se for um analista novo, vai para a lista da aba "Depois"
+      if (novosAnalistas.includes(analistaDesignado)) {
+        distribuicaoFinal.push([
+          cliente[idxId], cliente[idxCliente], analistaDesignado, cliente[idxFase], cliente[idxMRR]
+        ]);
+      }
+
+      // Contabiliza para o resumo (independente de ser novo ou antigo)
+      const fKey = faseNome.toLowerCase().replace(" ", "");
+      resumoStats[analistaDesignado][fKey]++;
+      resumoStats[analistaDesignado].total++;
+      resumoStats[analistaDesignado].mrr += parseFloat(cliente[idxMRR] || 0);
+      
+      globalIndex++;
+    });
+  });
+
+  // 3. Limpar e Preencher Aba "Depois"
+  abaDepois.clear(); 
+  
+  // Colunas A-E
+  abaDepois.getRange(1, 1, 1, 5).setValues([["ID ORIGINAL", "CLIENTE", "NOVO ANALISTA", "FASE", "MRR"]]).setFontWeight("bold");
+  if (distribuicaoFinal.length > 0) {
+    abaDepois.getRange(2, 1, distribuicaoFinal.length, 5).setValues(distribuicaoFinal);
+  }
+
+  // Colunas I-O (Resumo)
+  const cabecalhoResumo = [["Lista de Analistas", "Mayday", "Alert", "En Route", "Flying", "Total Clientes", "Total MRR"]];
+  abaDepois.getRange(1, 9, 1, 7).setValues(cabecalhoResumo).setFontWeight("bold").setBackground("#f3f3f3");
+
+  let linhasResumo = novosAnalistas.map(nome => {
+    let s = resumoStats[nome];
+    return [nome, s.mayday, s.alert, s.enroute, s.flying, s.total, s.mrr];
+  });
+
+  if (linhasResumo.length > 0) {
+    abaDepois.getRange(2, 9, linhasResumo.length, 7).setValues(linhasResumo);
+    abaDepois.getRange(2, 15, linhasResumo.length, 1).setNumberFormat("R$ #,##0.00");
+    abaDepois.getRange(1, 9, linhasResumo.length + 1, 7).setBorder(true, true, true, true, true, true);
+  }
+
+  ui.alert("Carteiras equilibradas com sucesso usando lógica de serpente!");
+}

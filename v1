@@ -1,0 +1,78 @@
+function montarNovasCarteiras() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const abaAntes = ss.getSheetByName("Antes");
+  const abaDepois = ss.getSheetByName("Depois");
+  
+  // 1. Pergunta quantas novas carteiras criar
+  const ui = SpreadsheetApp.getUi();
+  const resposta = ui.prompt("Montagem de Carteira", "Quantas novas carteiras você deseja montar?", ui.ButtonSet.OK_CANCEL);
+  
+  if (resposta.getSelectedButton() !== ui.Button.OK) return;
+  const numNovas = parseInt(resposta.getResponseText());
+  if (isNaN(numNovas) || numNovas <= 0) {
+    ui.alert("Por favor, insira um número válido.");
+    return;
+  }
+
+  // 2. Pegar dados da aba "Antes"
+  const dadosAntes = abaAntes.getDataRange().getValues();
+  const cabecalho = dadosAntes[0];
+  const clientes = dadosAntes.slice(1);
+  
+  // Mapear índices das colunas
+  const idxId = cabecalho.indexOf("ID Original");
+  const idxCliente = cabecalho.indexOf("Cliente");
+  const idxFase = cabecalho.indexOf("Fase");
+  const idxMRR = cabecalho.indexOf("MRR");
+  const idxCS = cabecalho.indexOf("CS");
+
+  // 3. Identificar analistas atuais e preparar lista total
+  const analistasAtuais = [...new Set(clientes.map(c => c[idxCS]).filter(cs => cs !== ""))];
+  const novosAnalistas = Array.from({length: numNovas}, (_, i) => `Analista ${i + 1}`);
+  const todosAnalistas = [...analistasAtuais, ...novosAnalistas];
+
+  // 4. Lógica de Distribuição Equilibrada
+  // Ordenar por Fase e depois por MRR (maior para o menor) para equilibrar o financeiro
+  clientes.sort((a, b) => {
+    if (a[idxFase] < b[idxFase]) return -1;
+    if (a[idxFase] > b[idxFase]) return 1;
+    return b[idxMRR] - a[idxMRR]; // MRR decrescente
+  });
+
+  let distribuicao = [];
+  
+  // Distribuir entre todos para garantir a mesma média
+  clientes.forEach((cliente, index) => {
+    const analistaDesignado = todosAnalistas[index % todosAnalistas.length];
+    
+    // Guardar apenas se o analista for um dos NOVOS
+    if (novosAnalistas.includes(analistaDesignado)) {
+      distribuicao.push([
+        cliente[idxId],        // ID ORIGINAL
+        cliente[idxCliente],   // CLIENTE
+        analistaDesignado,     // NOVO ANALISTA
+        cliente[idxFase],      // FASE
+        cliente[idxMRR]        // MRR
+      ]);
+    }
+  });
+
+  // 5. Gravar na aba "Depois"
+  abaDepois.clear(); // Limpa a aba antes de colar
+  abaDepois.getRange(1, 1, 1, 5).setValues([["ID ORIGINAL", "CLIENTE", "NOVO ANALISTA", "FASE", "MRR"]]);
+  
+  if (distribuicao.length > 0) {
+    abaDepois.getRange(2, 1, distribuicao.length, 5).setValues(distribuicao);
+    ui.alert("Sucesso! " + distribuicao.length + " clientes distribuídos para " + numNovas + " nova(s) carteira(s).");
+  } else {
+    ui.alert("Não houve clientes suficientes para a distribuição.");
+  }
+}
+
+// Criar um menu na planilha para facilitar o uso
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('🚀 Automação CS')
+      .addItem('Montar Novas Carteiras', 'montarNovasCarteiras')
+      .addToUi();
+}

@@ -1,0 +1,108 @@
+function montarNovasCarteiras() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const abaAntes = ss.getSheetByName("Antes");
+  const abaDepois = ss.getSheetByName("Depois");
+  
+  const ui = SpreadsheetApp.getUi();
+  const resposta = ui.prompt("Montagem de Carteira", "Quantas novas carteiras você deseja montar?", ui.ButtonSet.OK_CANCEL);
+  
+  if (resposta.getSelectedButton() !== ui.Button.OK) return;
+  const numNovas = parseInt(resposta.getResponseText());
+  if (isNaN(numNovas) || numNovas <= 0) {
+    ui.alert("Por favor, insira um número válido.");
+    return;
+  }
+
+  const dadosAntes = abaAntes.getDataRange().getValues();
+  const cabecalho = dadosAntes[0];
+  const clientes = dadosAntes.slice(1);
+  
+  const idxId = cabecalho.indexOf("ID Original");
+  const idxCliente = cabecalho.indexOf("Cliente");
+  const idxFase = cabecalho.indexOf("Fase");
+  const idxMRR = cabecalho.indexOf("MRR");
+  const idxCS = cabecalho.indexOf("CS");
+
+  const analistasAtuais = [...new Set(clientes.map(c => c[idxCS]).filter(cs => cs !== ""))];
+  const novosAnalistas = Array.from({length: numNovas}, (_, i) => `Analista ${i + 1}`);
+  const todosAnalistas = [...analistasAtuais, ...novosAnalistas];
+
+  // Ordenar por Fase e MRR decrescente para equilíbrio
+  clientes.sort((a, b) => {
+    if (a[idxFase] < b[idxFase]) return -1;
+    if (a[idxFase] > b[idxFase]) return 1;
+    return b[idxMRR] - a[idxMRR];
+  });
+
+  let distribuicao = [];
+  
+  // Objeto para armazenar o resumo (stats) de cada NOVO analista
+  let resumoStats = {};
+  novosAnalistas.forEach(nome => {
+    resumoStats[nome] = { mayday: 0, alert: 0, enroute: 0, flying: 0, total: 0, mrr: 0 };
+  });
+
+  clientes.forEach((cliente, index) => {
+    const analistaDesignado = todosAnalistas[index % todosAnalistas.length];
+    
+    if (novosAnalistas.includes(analistaDesignado)) {
+      distribuicao.push([
+        cliente[idxId],        // ID ORIGINAL
+        cliente[idxCliente],   // CLIENTE
+        analistaDesignado,     // NOVO ANALISTA
+        cliente[idxFase],      // FASE
+        cliente[idxMRR]        // MRR
+      ]);
+
+      // Atualizar o resumo estatístico
+      const fase = cliente[idxFase].toString().trim();
+      if (fase === "Mayday") resumoStats[analistaDesignado].mayday++;
+      else if (fase === "Alert") resumoStats[analistaDesignado].alert++;
+      else if (fase === "En Route") resumoStats[analistaDesignado].enroute++;
+      else if (fase === "Flying") resumoStats[analistaDesignado].flying++;
+      
+      resumoStats[analistaDesignado].total++;
+      resumoStats[analistaDesignado].mrr += parseFloat(cliente[idxMRR] || 0);
+    }
+  });
+
+  // LIMPEZA E PREENCHIMENTO DA ABA "DEPOIS"
+  abaDepois.clear(); 
+
+  // 1. Preencher Lista de Clientes (A até E)
+  const cabecalhoClientes = [["ID ORIGINAL", "CLIENTE", "NOVO ANALISTA", "FASE", "MRR"]];
+  abaDepois.getRange(1, 1, 1, 5).setValues(cabecalhoClientes);
+  if (distribuicao.length > 0) {
+    abaDepois.getRange(2, 1, distribuicao.length, 5).setValues(distribuicao);
+  }
+
+  // 2. Preencher Resumo Gerencial (I até O)
+  const cabecalhoResumo = [["Lista de Analistas", "Mayday", "Alert", "En Route", "Flying", "Total Clientes", "Total MRR"]];
+  abaDepois.getRange(1, 9, 1, 7).setValues(cabecalhoResumo); // Coluna 9 é a 'I'
+
+  let linhasResumo = [];
+  novosAnalistas.forEach(nome => {
+    let s = resumoStats[nome];
+    linhasResumo.push([
+      nome, 
+      s.mayday, 
+      s.alert, 
+      s.enroute, 
+      s.flying, 
+      s.total, 
+      s.mrr
+    ]);
+  });
+
+  if (linhasResumo.length > 0) {
+    abaDepois.getRange(2, 9, linhasResumo.length, 7).setValues(linhasResumo);
+    
+    // Formatação básica: Coloca bordas e negrito no cabeçalho do resumo
+    abaDepois.getRange(1, 9, 1, 7).setFontWeight("bold").setBackground("#f3f3f3");
+    abaDepois.getRange(1, 9, linhasResumo.length + 1, 7).setBorder(true, true, true, true, true, true);
+    // Formata coluna de MRR (O) como moeda
+    abaDepois.getRange(2, 15, linhasResumo.length, 1).setNumberFormat("R$ #,##0.00");
+  }
+
+  ui.alert("Carteiras montadas! O resumo da divisão foi inserido nas colunas I até O.");
+}

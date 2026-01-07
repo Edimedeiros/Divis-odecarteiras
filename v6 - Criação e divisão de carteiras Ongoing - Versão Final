@@ -1,0 +1,220 @@
+/**
+ * FUNÇÃO PRINCIPAL: Inicia o fluxo e gerencia as perguntas.
+ */
+function executarAutomacaoCompleta() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+  
+  const menuInicial = ui.alert("🚀 Gestão de Carteiras", "O que você deseja fazer?\n\n[SIM] - Criar novas carteiras\n[NÃO] - Dissolver carteiras existentes", ui.ButtonSet.YES_NO_CANCEL);
+  
+  if (menuInicial == ui.Button.CANCEL) return;
+
+  const modo = (menuInicial == ui.Button.YES) ? "CRIAR" : "DISSOLVER";
+
+  if (modo === "CRIAR") {
+    const prompt = ui.prompt("Montagem de Carteira", "Quantas novas carteiras você deseja montar?", ui.ButtonSet.OK_CANCEL);
+    if (prompt.getSelectedButton() !== ui.Button.OK) return;
+    const nNovas = parseInt(prompt.getResponseText());
+    if (isNaN(nNovas) || nNovas <= 0) return ui.alert("Insira um número válido.");
+    
+    unificarDados(modo);
+    distribuirCarteiras(modo, nNovas);
+
+  } else {
+    const abaClientes = ss.getSheetByName("Tabela clientes");
+    const dados = abaClientes.getDataRange().getValues();
+    const cabecalho = dados[0];
+    const norm = (t) => t ? t.toString().trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "") : "";
+    const idxCS = cabecalho.findIndex(c => norm(c) === "cs");
+    
+    let analistas = [...new Set(dados.slice(1).map(r => r[idxCS]).filter(c => c !== ""))].sort();
+    let listaTxt = analistas.map((a, i) => (i + 1) + ") " + a).join("\n");
+    
+    const promptDissolver = ui.prompt("🗑️ Dissolver Carteiras", 
+      "Digite os NÚMEROS dos CSs que saíram (separe por vírgula, ex: 1, 3):\n\n" + listaTxt, 
+      ui.ButtonSet.OK_CANCEL);
+    
+    if (promptDissolver.getSelectedButton() !== ui.Button.OK) return;
+    
+    let escolhas = promptDissolver.getResponseText().split(",").map(n => parseInt(n.trim()) - 1);
+    let nomesDissolver = escolhas.map(i => analistas[i]).filter(n => n !== undefined);
+    
+    if (nomesDissolver.length === 0) return ui.alert("Seleção inválida.");
+
+    unificarDados(modo);
+    distribuirCarteiras(modo, nomesDissolver);
+  }
+}
+
+/**
+ * ETAPA 1: UNIFICAÇÃO
+ */
+function unificarDados(modo) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const abaClientes = ss.getSheetByName("Tabela clientes");
+  const abaJornada = ss.getSheetByName("Tabela jornada");
+  const abaUnificados = ss.getSheetByName("Dados Unificados");
+  
+  ss.toast("Cruzando dados...", "Etapa 1", 2);
+
+  const dadosClientes = abaClientes.getDataRange().getValues();
+  const dadosJornada = abaJornada.getDataRange().getValues();
+  const cabecalhoCli = dadosClientes[0];
+
+  const norm = (t) => t ? t.toString().trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "") : "";
+  const localizar = (nome) => cabecalhoCli.findIndex(c => norm(c) === norm(nome));
+
+  const idxId = localizar("ID ORIGINAL"), idxCS = localizar("CS"), idxLider = localizar("Lider Ongoing"),
+        idxFase = localizar("Fase"), idxMRR = localizar("MRR"), idxNome = localizar("Cliente");
+
+  let mapaClientes = {};
+  for (let i = 1; i < dadosClientes.length; i++) {
+    let id = dadosClientes[i][idxId].toString().trim();
+    if (id) mapaClientes[id] = { nome: dadosClientes[i][idxNome], cs: dadosClientes[i][idxCS], fase: dadosClientes[i][idxFase], mrr: dadosClientes[i][idxMRR], lider: dadosClientes[i][idxLider] };
+  }
+
+  let listaUnificada = [];
+  const fasesIncluir = ["mayday", "alert", "en route", "fly", "flying", "onboarding", "retomada"];
+  const excluir = ["cancelado", "tratativa de cancelamento"];
+
+  for (let j = 1; j < dadosJornada.length; j++) {
+    let celula = dadosJornada[j][0].toString();
+    if (!celula) continue;
+    let texto = celula.toLowerCase();
+
+    if (excluir.some(termo => texto.includes(termo))) continue;
+    if (!fasesIncluir.some(termo => texto.includes(termo))) continue;
+
+    let match = celula.match(/"(\d+)"\s*$/);
+    if (match && mapaClientes[match[1]]) {
+      let c = mapaClientes[match[1]];
+      let faseFinal = c.fase.toString().replace(/Fly$/i, "Flying");
+      listaUnificada.push([match[1], c.nome, c.cs, faseFinal, c.mrr, c.lider]);
+    }
+  }
+
+  abaUnificados.clear().getRange(1, 1, 1, 6).setValues([["ID Original", "Cliente", "CS", "Fase", "MRR", "Lider Ongoing"]]).setFontWeight("bold").setBackground("#E0E0E0");
+  if (listaUnificada.length > 0) abaUnificados.getRange(2, 1, listaUnificada.length, 6).setValues(listaUnificada);
+}
+
+/**
+ * ETAPA 2: DISTRIBUIÇÃO E BACKUP
+ */
+function distribuirCarteiras(modo, parametro) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const abaUnificados = ss.getSheetByName("Dados Unificados");
+  const abaDepois = ss.getSheetByName("Depois");
+  
+  ss.toast("Equilibrando MRR...", "Etapa 2", 2);
+
+  const clientes = abaUnificados.getDataRange().getValues().slice(1);
+  let analistasAlvo = [];
+  let analistasAtuais = [...new Set(clientes.map(c => c[2]).filter(cs => cs !== ""))];
+
+  if (modo === "CRIAR") {
+    let novos = Array.from({length: parametro}, (_, i) => "Analista " + (i + 1));
+    analistasAlvo = [...analistasAtuais, ...novos];
+  } else {
+    analistasAlvo = analistasAtuais.filter(a => !parametro.includes(a));
+  }
+
+  clientes.sort((a, b) => {
+    if (a[3] < b[3]) return -1;
+    if (a[3] > b[3]) return 1;
+    return (parseFloat(b[4]) || 0) - (parseFloat(a[4]) || 0);
+  });
+
+  let resultadoExibicao = [["ID ORIGINAL", "CLIENTE", "NOVO ANALISTA", "LÍDER ONGOING", "FASE", "MRR"]];
+  let stats = {};
+  analistasAlvo.forEach(n => stats[n] = { mayday: 0, alert: 0, enroute: 0, flying: 0, total: 0, mrr: 0 });
+
+  clientes.forEach((cliente, i) => {
+    let turno = Math.floor(i / analistasAlvo.length);
+    let dir = i % analistasAlvo.length;
+    let idxA = (turno % 2 === 0) ? dir : (analistasAlvo.length - 1 - dir);
+    let analistaDestino = analistasAlvo[idxA];
+    let analistaOriginal = cliente[2];
+    let lider = cliente[5];
+
+    if (modo === "CRIAR") {
+      if (analistaDestino.startsWith("Analista ")) {
+        resultadoExibicao.push([cliente[0], cliente[1], analistaDestino, lider, cliente[3], cliente[4]]);
+      }
+    } else {
+      if (parametro.includes(analistaOriginal)) {
+        resultadoExibicao.push([cliente[0], cliente[1], analistaDestino, lider, cliente[3], cliente[4]]);
+      }
+    }
+
+    let f = cliente[3].toString().toLowerCase();
+    if (f.includes("mayday")) stats[analistaDestino].mayday++;
+    else if (f.includes("alert")) stats[analistaDestino].alert++;
+    else if (f.includes("en route")) stats[analistaDestino].enroute++;
+    else if (f.includes("flying")) stats[analistaDestino].flying++;
+    
+    stats[analistaDestino].total = stats[analistaDestino].mayday + stats[analistaDestino].alert + stats[analistaDestino].enroute + stats[analistaDestino].flying;
+    stats[analistaDestino].mrr += (parseFloat(cliente[4]) || 0);
+  });
+
+  abaDepois.clear().clearFormats();
+  if (resultadoExibicao.length > 1) {
+    abaDepois.getRange(1, 1, resultadoExibicao.length, 6).setValues(resultadoExibicao);
+    abaDepois.getRange(1, 1, 1, 6).setFontWeight("bold").setBackground("#444444").setFontColor("white");
+    abaDepois.getRange(2, 6, resultadoExibicao.length - 1, 1).setNumberFormat("R$ #,##0.00");
+  }
+
+  let resumoData = [["Lista de Analistas", "Mayday", "Alert", "En Route", "Flying", "Total Clientes", "Total MRR"]];
+  analistasAlvo.forEach(n => {
+    resumoData.push([n, stats[n].mayday, stats[n].alert, stats[n].enroute, stats[n].flying, stats[n].total, stats[n].mrr]);
+  });
+
+  abaDepois.getRange(1, 9, resumoData.length, 7).setValues(resumoData);
+  abaDepois.getRange(1, 9, 1, 7).setFontWeight("bold").setBackground("#F3F3F3");
+  abaDepois.getRange(2, 15, resumoData.length - 1, 1).setNumberFormat("R$ #,##0.00");
+  abaDepois.getRange(1, 9, resumoData.length, 7).setBorder(true, true, true, true, true, true);
+
+  abaDepois.setColumnWidth(2, 250); 
+  abaDepois.setColumnWidth(3, 150); 
+  abaDepois.setColumnWidth(4, 150); 
+  abaDepois.setColumnWidth(9, 180); 
+  abaDepois.setColumnWidth(15, 120); 
+
+  // CHAMADA DO BACKUP
+  criarBackupNoDrive(modo);
+
+  SpreadsheetApp.getUi().alert("✅ Processo concluído! Backup salvo no seu Drive.");
+}
+
+/**
+ * NOVA FUNÇÃO: Cria cópia da aba "Depois" no Drive com nome dinâmico.
+ */
+function criarBackupNoDrive(modo) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const abaDepois = ss.getSheetByName("Depois");
+  const usuario = Session.getEffectiveUser().getEmail().split("@")[0]; // Pega o nome do e-mail
+  
+  const dataHoje = Utilities.formatDate(new Date(), "GMT-3", "dd/MM/yyyy");
+  const prefixo = (modo === "CRIAR") ? "Montagem_carteira" : "Distribuição_carteira";
+  
+  // Lógica para encontrar a versão do dia
+  const pastaRaiz = DriveApp.getRootFolder();
+  const arquivos = pastaRaiz.getFilesByName(prefixo + " (" + dataHoje + " - Versão 1)");
+  let versao = 1;
+  
+  // Busca se já existem versões para incrementar (simplificado por timestamp para unicidade)
+  const timestamp = Utilities.formatDate(new Date(), "GMT-3", "HH-mm");
+  const nomeArquivo = `${prefixo}(${dataHoje} - Versão ${timestamp} - Executado por ${usuario})`;
+
+  const novoSS = SpreadsheetApp.create(nomeArquivo);
+  abaDepois.copyTo(novoSS);
+  
+  // Remove a aba vazia padrão "Página1" do novo arquivo
+  const sheetPadrao = novoSS.getSheetByName("Página1") || novoSS.getSheetByName("Sheet1");
+  if (sheetPadrao) novoSS.deleteSheet(sheetPadrao);
+  
+  ss.toast("Backup criado: " + nomeArquivo, "Drive", 3);
+}
+
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu('🚀 Automação CS').addItem('Rodar Processo Completo', 'executarAutomacaoCompleta').addToUi();
+}

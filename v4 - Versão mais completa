@@ -1,0 +1,178 @@
+/**
+ * FUNÇÃO PRINCIPAL: Agora ela pergunta primeiro e processa depois.
+ */
+function executarAutomacaoCompleta() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+  
+  // 1. PERGUNTA LOGO NO INÍCIO
+  const prompt = ui.prompt("Montagem de Carteira", "Quantas novas carteiras você deseja montar?", ui.ButtonSet.OK_CANCEL);
+  
+  // Se cancelar ou fechar, para aqui
+  if (prompt.getSelectedButton() !== ui.Button.OK) return;
+  
+  const nNovas = parseInt(prompt.getResponseText());
+  if (isNaN(nNovas) || nNovas <= 0) {
+    ui.alert("Por favor, insira um número válido (ex: 1, 2, 5...).");
+    return;
+  }
+
+  try {
+    // 2. FAZ A ANÁLISE/UNIFICAÇÃO
+    unificarDados(); 
+    
+    // 3. FAZ A DISTRIBUIÇÃO USANDO O NÚMERO INFORMADO
+    distribuirCarteiras(nNovas); 
+    
+    ui.alert("Sucesso! Processo concluído para " + nNovas + " nova(s) carteira(s).");
+  } catch (e) {
+    ui.alert("Atenção: " + e.message);
+  }
+}
+
+/**
+ * ETAPA 1: UNIFICAÇÃO E LIMPEZA
+ */
+function unificarDados() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const abaClientes = ss.getSheetByName("Tabela clientes");
+  const abaJornada = ss.getSheetByName("Tabela jornada");
+  const abaUnificados = ss.getSheetByName("Dados Unificados");
+  
+  if (!abaClientes || !abaJornada || !abaUnificados) {
+    throw new Error("Abas não encontradas. Verifique os nomes: 'Tabela clientes', 'Tabela jornada' e 'Dados Unificados'.");
+  }
+
+  const dadosClientes = abaClientes.getDataRange().getValues();
+  const dadosJornada = abaJornada.getDataRange().getValues();
+  const cabecalhoCli = dadosClientes[0];
+
+  const normalizar = (t) => t ? t.toString().trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "") : "";
+
+  const localizar = (nomeBusca) => {
+    const nomeNorm = normalizar(nomeBusca);
+    const idx = cabecalhoCli.findIndex(c => normalizar(c) === nomeNorm);
+    if (idx === -1) throw new Error("Coluna '" + nomeBusca + "' não encontrada na Tabela clientes.");
+    return idx;
+  };
+
+  const idxIdCli = localizar("ID ORIGINAL");
+  const idxCSCli = localizar("CS");
+  const idxLiderCli = localizar("Lider Ongoing"); 
+  const idxFaseCli = localizar("Fase");
+  const idxMRRCli = localizar("MRR");
+  const idxNomeCli = localizar("Cliente");
+
+  let mapaClientes = {};
+  for (let i = 1; i < dadosClientes.length; i++) {
+    let rawId = dadosClientes[i][idxIdCli];
+    if (!rawId) continue;
+    
+    let idStr = rawId.toString().trim();
+    mapaClientes[idStr] = {
+      cs: dadosClientes[i][idxCSCli],
+      lider: dadosClientes[i][idxLiderCli],
+      fase: dadosClientes[i][idxFaseCli],
+      mrr: dadosClientes[i][idxMRRCli],
+      nome: dadosClientes[i][idxNomeCli]
+    };
+  }
+
+  let listaUnificada = [];
+  const filtrosProibidos = ["onboarding", "retomada", "cancelado", "tratativa de cancelamento"];
+
+  for (let j = 1; j < dadosJornada.length; j++) {
+    let celulaRaw = dadosJornada[j][0];
+    if (!celulaRaw) continue;
+
+    let texto = celulaRaw.toString();
+    if (filtrosProibidos.some(termo => texto.toLowerCase().includes(termo))) continue;
+
+    let match = texto.match(/"(\d+)"\s*$/);
+    if (!match) continue;
+    let idJornada = match[1];
+
+    if (mapaClientes[idJornada]) {
+      let c = mapaClientes[idJornada];
+      listaUnificada.push([idJornada, c.nome, c.cs, c.fase, c.mrr, c.lider]);
+    }
+  }
+
+  abaUnificados.clear();
+  abaUnificados.getRange(1, 1, 1, 6)
+    .setValues([["ID Original", "Cliente", "CS", "Fase", "MRR", "Lider Ongoing"]])
+    .setFontWeight("bold").setBackground("#E0E0E0");
+
+  if (listaUnificada.length > 0) {
+    abaUnificados.getRange(2, 1, listaUnificada.length, 6).setValues(listaUnificada);
+  }
+}
+
+/**
+ * ETAPA 2: DISTRIBUIÇÃO (Agora recebe nNovas como parâmetro)
+ */
+function distribuirCarteiras(nNovas) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const abaUnificados = ss.getSheetByName("Dados Unificados");
+  const abaDepois = ss.getSheetByName("Depois");
+
+  const dados = abaUnificados.getDataRange().getValues();
+  if (dados.length <= 1) return;
+
+  const cabecalho = dados[0];
+  const clientes = dados.slice(1);
+  const idxCS = cabecalho.indexOf("CS");
+  const idxMRR = cabecalho.indexOf("MRR");
+  const idxFase = cabecalho.indexOf("Fase");
+
+  const atuais = [...new Set(clientes.map(c => c[idxCS]).filter(cs => cs !== ""))];
+  const novos = Array.from({length: nNovas}, (_, i) => "Analista " + (i + 1));
+  const todos = [...atuais, ...novos];
+
+  // Ordenação Serpente por MRR
+  clientes.sort((a, b) => (parseFloat(b[idxMRR]) || 0) - (parseFloat(a[idxMRR]) || 0));
+
+  let distribuicaoFinal = [];
+  let stats = {};
+  todos.forEach(n => stats[n] = { mayday: 0, alert: 0, enroute: 0, flying: 0, total: 0, mrr: 0 });
+
+  clientes.forEach((cliente, i) => {
+    let turno = Math.floor(i / todos.length);
+    let direcao = i % todos.length;
+    let idxA = (turno % 2 === 0) ? direcao : (todos.length - 1 - direcao);
+    let analista = todos[idxA];
+
+    if (novos.includes(analista)) {
+      distribuicaoFinal.push([cliente[0], cliente[1], analista, cliente[3], cliente[4]]);
+    }
+
+    let f = cliente[idxFase].toString().toLowerCase();
+    if (f.includes("mayday")) stats[analista].mayday++;
+    else if (f.includes("alert")) stats[analista].alert++;
+    else if (f.includes("en route") || f.includes("enroute")) stats[analista].enroute++;
+    else if (f.includes("flying")) stats[analista].flying++;
+    stats[analista].total++;
+    stats[analista].mrr += (parseFloat(cliente[idxMRR]) || 0);
+  });
+
+  abaDepois.clear();
+  abaDepois.getRange(1, 1, 1, 5).setValues([["ID ORIGINAL", "CLIENTE", "NOVO ANALISTA", "FASE", "MRR"]]).setFontWeight("bold");
+  if (distribuicaoFinal.length > 0) {
+    abaDepois.getRange(2, 1, distribuicaoFinal.length, 5).setValues(distribuicaoFinal);
+  }
+
+  let linhasResumo = novos.map(n => [n, stats[n].mayday, stats[n].alert, stats[n].enroute, stats[n].flying, stats[n].total, stats[n].mrr]);
+  abaDepois.getRange(1, 9, 1, 7).setValues([["Lista de Analistas", "Mayday", "Alert", "En Route", "Flying", "Total Clientes", "Total MRR"]]).setFontWeight("bold").setBackground("#F3F3F3");
+  
+  if (linhasResumo.length > 0) {
+    abaDepois.getRange(2, 9, linhasResumo.length, 7).setValues(linhasResumo);
+    abaDepois.getRange(2, 15, linhasResumo.length, 1).setNumberFormat("R$ #,##0.00");
+    abaDepois.getRange(1, 9, linhasResumo.length + 1, 7).setBorder(true, true, true, true, true, true);
+  }
+}
+
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu('🚀 Automação CS')
+      .addItem('Rodar Processo Completo', 'executarAutomacaoCompleta')
+      .addToUi();
+}

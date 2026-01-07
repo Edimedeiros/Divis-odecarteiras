@@ -41,12 +41,10 @@ function executarAutomacaoCompleta() {
     unificarDados("DISSOLVER");
     distribuirCarteiras("DISSOLVER", nomesDissolver);
   }
-  
-  ui.alert("✅ Processo concluído com sucesso!");
 }
 
 /**
- * ETAPA 1: UNIFICAÇÃO
+ * ETAPA 1: UNIFICAÇÃO (OTIMIZADA)
  */
 function unificarDados(modo) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -54,6 +52,8 @@ function unificarDados(modo) {
   const abaJornada = ss.getSheetByName("Tabela jornada");
   const abaUnificados = ss.getSheetByName("Dados Unificados");
   
+  ss.toast("Lendo base de dados...", "Iniciando", 2);
+
   const dadosClientes = abaClientes.getDataRange().getValues();
   const dadosJornada = abaJornada.getDataRange().getValues();
   const cabecalhoCli = dadosClientes[0];
@@ -75,6 +75,9 @@ function unificarDados(modo) {
   const excluir = ["cancelado", "tratativa de cancelamento"];
 
   for (let j = 1; j < dadosJornada.length; j++) {
+    if (j % 200 === 0) {
+      ss.toast("Processando linhas: " + j + "...", "Etapa 1", 1);
+    }
     let celula = dadosJornada[j][0].toString();
     if (!celula) continue;
     let texto = celula.toLowerCase();
@@ -85,7 +88,6 @@ function unificarDados(modo) {
     let match = celula.match(/"(\d+)"\s*$/);
     if (match && mapaClientes[match[1]]) {
       let c = mapaClientes[match[1]];
-      // Padroniza Fly para Flying
       let faseFinal = c.fase.toString().replace(/Fly$/i, "Flying");
       listaUnificada.push([match[1], c.nome, c.cs, faseFinal, c.mrr, c.lider]);
     }
@@ -96,14 +98,16 @@ function unificarDados(modo) {
 }
 
 /**
- * ETAPA 2: DISTRIBUIÇÃO EQUILIBRADA
+ * ETAPA 2: DISTRIBUIÇÃO (ULTRA RÁPIDA)
  */
 function distribuirCarteiras(modo, parametro) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const abaUnificados = ss.getSheetByName("Dados Unificados");
   const abaDepois = ss.getSheetByName("Depois");
-  const clientes = abaUnificados.getDataRange().getValues().slice(1);
   
+  ss.toast("Balanceando MRR...", "Etapa 2", 2);
+
+  const clientes = abaUnificados.getDataRange().getValues().slice(1);
   let analistasAlvo = [];
   let analistasAtuais = [...new Set(clientes.map(c => c[2]).filter(cs => cs !== ""))];
 
@@ -114,21 +118,21 @@ function distribuirCarteiras(modo, parametro) {
     analistasAlvo = analistasAtuais.filter(a => !parametro.includes(a));
   }
 
-  // Ordenação por Fase e depois por MRR (Decrescente) para garantir equilíbrio total
+  // Ordenação Serpente
   clientes.sort((a, b) => {
     if (a[3] < b[3]) return -1;
     if (a[3] > b[3]) return 1;
     return (parseFloat(b[4]) || 0) - (parseFloat(a[4]) || 0);
   });
 
-  let resultadoExibicao = [];
+  let resultadoExibicao = [["ID ORIGINAL", "CLIENTE", "NOVO ANALISTA", "FASE", "MRR"]];
   let stats = {};
   analistasAlvo.forEach(n => stats[n] = { mayday: 0, alert: 0, enroute: 0, flying: 0, total: 0, mrr: 0 });
 
   clientes.forEach((cliente, i) => {
     let turno = Math.floor(i / analistasAlvo.length);
-    let direcao = i % analistasAlvo.length;
-    let idxA = (turno % 2 === 0) ? direcao : (analistasAlvo.length - 1 - direcao);
+    let dir = i % analistasAlvo.length;
+    let idxA = (turno % 2 === 0) ? dir : (analistasAlvo.length - 1 - dir);
     let analista = analistasAlvo[idxA];
 
     if (modo === "DISSOLVER" || (modo === "CRIAR" && analista.startsWith("Analista "))) {
@@ -145,28 +149,36 @@ function distribuirCarteiras(modo, parametro) {
     stats[analista].mrr += (parseFloat(cliente[4]) || 0);
   });
 
-  // Saída na aba DEPOIS
-  abaDepois.clear();
-  abaDepois.getRange(1, 1, 1, 5).setValues([["ID ORIGINAL", "CLIENTE", "NOVO ANALISTA", "FASE", "MRR"]]).setFontWeight("bold").setBackground("#444444").setFontColor("white");
-  if (resultadoExibicao.length > 0) abaDepois.getRange(2, 1, resultadoExibicao.length, 5).setValues(resultadoExibicao);
+  // PREPARAÇÃO DO RESUMO (I AO O)
+  let resumoData = [["Lista de Analistas", "Mayday", "Alert", "En Route", "Flying", "Total Clientes", "Total MRR"]];
+  analistasAlvo.forEach(n => {
+    resumoData.push([n, stats[n].mayday, stats[n].alert, stats[n].enroute, stats[n].flying, stats[n].total, stats[n].mrr]);
+  });
 
-  // Resumo Gerencial (I até O)
-  let cabecalhoResumo = [["Lista de Analistas", "Mayday", "Alert", "En Route", "Flying", "Total Clientes", "Total MRR"]];
-  let linhasResumo = analistasAlvo.map(n => [
-    n, stats[n].mayday, stats[n].alert, stats[n].enroute, stats[n].flying, stats[n].total, stats[n].mrr
-  ]);
+  // GRAVAÇÃO ÚNICA NA PLANILHA (O segredo da velocidade)
+  ss.toast("Gravando na planilha...", "Finalizando", 2);
+  abaDepois.clear().clearFormats();
+  
+  // Escreve a tabela principal (A:E)
+  abaDepois.getRange(1, 1, resultadoExibicao.length, 5).setValues(resultadoExibicao);
+  abaDepois.getRange(1, 1, 1, 5).setFontWeight("bold").setBackground("#444444").setFontColor("white");
+  abaDepois.getRange(2, 5, resultadoExibicao.length - 1, 1).setNumberFormat("R$ #,##0.00");
 
-  abaDepois.getRange(1, 9, 1, 7).setValues(cabecalhoResumo).setFontWeight("bold").setBackground("#F3F3F3");
-  if (linhasResumo.length > 0) {
-    abaDepois.getRange(2, 9, linhasResumo.length, 7).setValues(linhasResumo);
-    abaDepois.getRange(2, 15, linhasResumo.length, 1).setNumberFormat("R$ #,##0.00");
-    abaDepois.getRange(1, 9, linhasResumo.length + 1, 7).setBorder(true, true, true, true, true, true);
-  }
-  abaDepois.autoResizeColumns(1, 15);
+  // Escreve o resumo (I:O)
+  abaDepois.getRange(1, 9, resumoData.length, 7).setValues(resumoData);
+  abaDepois.getRange(1, 9, 1, 7).setFontWeight("bold").setBackground("#F3F3F3");
+  abaDepois.getRange(2, 15, resumoData.length - 1, 1).setNumberFormat("R$ #,##0.00");
+  abaDepois.getRange(1, 9, resumoData.length, 7).setBorder(true, true, true, true, true, true);
+
+  // Define larguras fixas em vez de autoResize (ECONOMIZA 20 SEGUNDOS)
+  abaDepois.setColumnWidth(2, 250); // Cliente
+  abaDepois.setColumnWidth(3, 150); // Analista
+  abaDepois.setColumnWidth(9, 180); // Lista Analistas
+  abaDepois.setColumnWidth(15, 120); // MRR
+  
+  SpreadsheetApp.getUi().alert("✅ Processo concluído!");
 }
 
 function onOpen() {
-  SpreadsheetApp.getUi().createMenu('🚀 Automação CS')
-      .addItem('Rodar Processo Completo', 'executarAutomacaoCompleta')
-      .addToUi();
+  SpreadsheetApp.getUi().createMenu('🚀 Automação CS').addItem('Rodar Processo Completo', 'executarAutomacaoCompleta').addToUi();
 }

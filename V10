@@ -1,0 +1,696 @@
+// =========================================================================
+// CONFIGURAÇÕES GLOBAIS DA API (Ambiente de Homologação)
+// =========================================================================
+const TOKEN_ORIGINAL = "MTQyMmE3N2NjNzhlMmY0YzUwNzVmNWQ4YThlNjhhNDE=";
+const TOKEN_DECODIFICADO = "1422a77cc78e2f4c5075f5d8a8e68a41";
+const SENSE_BASE_URL = "https://api.hom.sensedata.io/v2"; 
+
+// 🎯 COLOQUE AQUI O ID EXATO DA "Alteração de CS" (Pegue na aba Tipos de Atividade)
+const ID_TIPO_ALTERACAO_CS = 21; // <--- APAGUE O 11 E COLOQUE O SEU NÚMERO AQUI!
+
+// O robô preencherá esta variável sozinho de forma automática em milissegundos
+let CONFIG_AUTENTICACAO_VALIDA = null; 
+// =========================================================================
+
+/**
+ * FUNÇÃO DE ENVIO SEGURO (ANTI-BLOQUEIO 429)
+ */
+function safeFetch(url, options) {
+  let tentativas = 0;
+  let res = null;
+  
+  while (tentativas < 5) {
+    res = UrlFetchApp.fetch(url, options);
+    let status = res.getResponseCode();
+    
+    if (status === 429) {
+      let tempoEspera = 15; 
+      try {
+        let json = JSON.parse(res.getContentText());
+        if (json.errors && json.errors[0] && json.errors[0].reset) {
+          tempoEspera = parseInt(json.errors[0].reset) + 2; 
+        }
+      } catch(e) {}
+      
+      SpreadsheetApp.getActiveSpreadsheet().toast(`API cheia. Pausando por ${tempoEspera} segundos para respeitar o limite...`, "SenseData", -1);
+      SpreadsheetApp.flush(); 
+      Utilities.sleep(tempoEspera * 1000);
+      tentativas++;
+    } else {
+      return res;
+    }
+  }
+  return res;
+}
+
+/**
+ * SCANNER AUTOMÁTICO: Descobre o formato exato exigido pelo SenseData (Elimina Erro 401)
+ */
+function descobrirCombinacaoAutenticacao() {
+  if (CONFIG_AUTENTICACAO_VALIDA) return true;
+
+  const combinacoes = [
+    { label: "Bearer + Token Decodificado", headers: { "Authorization": "Bearer " + TOKEN_DECODIFICADO, "Content-Type": "application/json" } },
+    { label: "Bearer + Token Original", headers: { "Authorization": "Bearer " + TOKEN_ORIGINAL, "Content-Type": "application/json" } },
+    { label: "X-SenseData-Token + Token Decodificado", headers: { "X-SenseData-Token": TOKEN_DECODIFICADO, "Content-Type": "application/json" } },
+    { label: "X-SenseData-Token + Token Original", headers: { "X-SenseData-Token": TOKEN_ORIGINAL, "Content-Type": "application/json" } },
+    { label: "Authorization Direto + Token Decodificado", headers: { "Authorization": TOKEN_DECODIFICADO, "Content-Type": "application/json" } },
+    { label: "Authorization Direto + Token Original", headers: { "Authorization": TOKEN_ORIGINAL, "Content-Type": "application/json" } }
+  ];
+
+  for (let i = 0; i < combinacoes.length; i++) {
+    try {
+      let res = UrlFetchApp.fetch(SENSE_BASE_URL + "/users?page_size=1", {
+        method: "GET",
+        headers: combinacoes[i].headers,
+        muteHttpExceptions: true
+      });
+      
+      if (res.getResponseCode() === 200) {
+        CONFIG_AUTENTICACAO_VALIDA = combinacoes[i].headers;
+        console.log(`🎯 Conexão estabelecida usando o método: ${combinacoes[i].label}`);
+        return true;
+      }
+    } catch(e) {}
+  }
+  return false;
+}
+
+/**
+ * FUNÇÃO PRINCIPAL: Menu expandido com 3 opções.
+ */
+function executarAutomacaoCompleta() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+  
+  const menuMsg = "Escolha a operação desejada:\n\n" +
+                  "1) ➕ Criar novas carteiras (Digitar nomes)\n" +
+                  "2) 🗑️ Dissolver carteiras (Escolher recebedores via API)\n" +
+                  "3) 🔄 MISTO (Dissolver + Digitar novos)\n\n" +
+                  "Digite o número da opção (1, 2 ou 3):";
+                  
+  const promptInicial = ui.prompt("🚀 Gestão de Carteiras", menuMsg, ui.ButtonSet.OK_CANCEL);
+  
+  if (promptInicial.getSelectedButton() !== ui.Button.OK) return;
+  const opcao = promptInicial.getResponseText().trim();
+
+  let modo = "";
+  let parametro = null;
+
+  if (opcao === "1") {
+    modo = "CRIAR";
+    const prompt = ui.prompt("Montagem de Carteira", "Digite o(s) NOME(S) do(s) novo(s) analista(s).\n\nPara mais de um, separe por ponto e vírgula (;):", ui.ButtonSet.OK_CANCEL);
+    if (prompt.getSelectedButton() !== ui.Button.OK) return;
+    
+    let nomesNovos = prompt.getResponseText().split(";").map(n => n.trim()).filter(n => n !== "");
+    if (nomesNovos.length === 0) return ui.alert("Nenhum nome válido inserido.");
+    parametro = { novos: nomesNovos };
+
+  } else if (opcao === "2") {
+    modo = "DISSOLVER";
+    let listaSair = solicitarDissolucao(ui, ss);
+    if (!listaSair) return;
+    
+    let listaReceber = solicitarRecebedoresAPI(ui, ss);
+    if (!listaReceber) return;
+
+    parametro = { sair: listaSair, receber: listaReceber };
+
+  } else if (opcao === "3") {
+    modo = "MISTO";
+    let listaSair = solicitarDissolucao(ui, ss);
+    if (!listaSair) return;
+
+    let listaReceber = solicitarRecebedoresAPI(ui, ss);
+    if (!listaReceber) return;
+
+    const promptNovos = ui.prompt("Misto: Novos Analistas", "Digite o(s) NOME(S) dos NOVOS analistas (separe por ;).\nOu deixe em branco se não houver novos.", ui.ButtonSet.OK_CANCEL);
+    if (promptNovos.getSelectedButton() !== ui.Button.OK) return;
+    
+    let nomesNovos = promptNovos.getResponseText().split(";").map(n => n.trim()).filter(n => n !== "");
+    parametro = { sair: listaSair, receber: listaReceber, novos: nomesNovos };
+
+  } else {
+    return ui.alert("Opção inválida.");
+  }
+
+  unificarDados(modo);
+  distribuirCarteiras(modo, parametro);
+}
+
+/**
+ * FUNÇÃO AUXILIAR: Pede a lista de quem vai sair (Da Planilha)
+ */
+function solicitarDissolucao(ui, ss) {
+  const abaClientes = ss.getSheetByName("Tabela clientes");
+  const dados = abaClientes.getDataRange().getValues();
+  const cabecalho = dados[0];
+  const norm = (t) => t ? t.toString().trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "") : "";
+  const idxCS = cabecalho.findIndex(c => norm(c) === "cs");
+  
+  let analistas = [...new Set(dados.slice(1).map(r => r[idxCS]).filter(c => c !== ""))].sort();
+  let listaTxt = analistas.map((a, i) => (i + 1) + ") " + a).join("\n");
+  
+  const prompt = ui.prompt("🗑️ Passo 1: Quem SAI?", "Digite os NÚMEROS dos CSs que SAÍRAM (separe por vírgula):\n\n" + listaTxt, ui.ButtonSet.OK_CANCEL);
+  
+  if (prompt.getSelectedButton() !== ui.Button.OK) return null;
+  
+  let escolhas = prompt.getResponseText().split(",").map(n => parseInt(n.trim()) - 1);
+  let nomes = escolhas.map(i => analistas[i]).filter(n => n !== undefined);
+  
+  if (nomes.length === 0) {
+    ui.alert("Seleção inválida.");
+    return null;
+  }
+  return nomes;
+}
+
+/**
+ * FUNÇÃO AUXILIAR: Busca analistas ATIVOS na API
+ */
+function solicitarRecebedoresAPI(ui, ss) {
+  ss.toast("Validando acesso com o SenseData...", "API Auth", -1);
+  SpreadsheetApp.flush();
+  
+  if (!descobrirCombinacaoAutenticacao()) {
+    ui.alert("❌ Erro de Autenticação Crítico", "O SenseData recusou as chaves de acesso fornecidas.", ui.ButtonSet.OK);
+    return null;
+  }
+
+  ss.toast("Buscando analistas ativos no SenseData...", "API", -1);
+  SpreadsheetApp.flush();
+  let analistasAPI = [];
+
+  try {
+    let res = safeFetch(SENSE_BASE_URL + "/users?page_size=100", {
+      method: "GET",
+      headers: CONFIG_AUTENTICACAO_VALIDA,
+      muteHttpExceptions: true
+    });
+
+    if (res.getResponseCode() === 200) {
+      let json = JSON.parse(res.getContentText());
+      let users = json.users || json.data || json.items || json;
+      if (Array.isArray(users)) {
+        analistasAPI = users.filter(u => u.active).map(u => u.name).sort();
+      }
+    } else {
+      ui.alert("Erro de API", "Código: " + res.getResponseCode() + "\nResposta:\n" + res.getContentText(), ui.ButtonSet.OK);
+      return null;
+    }
+  } catch(e) {
+    ui.alert("Erro de Conexão", e.message, ui.ButtonSet.OK);
+    return null;
+  }
+
+  let listaTxt = analistasAPI.map((a, i) => (i + 1) + ") " + a).join("\n");
+  const prompt = ui.prompt("📥 Passo 2: Quem RECEBE?", 
+    "Analistas ATIVOS no SenseData (HOM).\nDigite os NÚMEROS de quem VAI RECEBER os clientes (separe por vírgula):\n\n" + listaTxt, 
+    ui.ButtonSet.OK_CANCEL);
+  
+  if (prompt.getSelectedButton() !== ui.Button.OK) return null;
+  
+  let escolhas = prompt.getResponseText().split(",").map(n => parseInt(n.trim()) - 1);
+  let nomes = escolhas.map(i => analistasAPI[i]).filter(n => n !== undefined);
+  if (nomes.length === 0) return ui.alert("Seleção inválida."), null;
+  
+  return nomes;
+}
+
+/**
+ * ETAPA 1: UNIFICAÇÃO
+ */
+function unificarDados(modo) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const abaClientes = ss.getSheetByName("Tabela clientes");
+  const abaJornada = ss.getSheetByName("Tabela jornada");
+  const abaUnificados = ss.getSheetByName("Dados Unificados");
+  
+  ss.toast("Cruzando dados e mapeando CNPJ...", "Etapa 1", -1);
+  SpreadsheetApp.flush();
+
+  const dadosClientes = abaClientes.getDataRange().getValues();
+  const dadosJornada = abaJornada.getDataRange().getValues();
+  const cabecalhoCli = dadosClientes[0];
+
+  const norm = (t) => t ? t.toString().trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "") : "";
+  const localizar = (nome) => cabecalhoCli.findIndex(c => norm(c) === norm(nome));
+
+  const idxId = localizar("ID ORIGINAL"), idxCS = localizar("CS"), idxLider = localizar("Lider Ongoing"),
+        idxFase = localizar("Fase"), idxMRR = localizar("MRR"), idxNome = localizar("Cliente"),
+        idxCNPJ = localizar("CNPJ"); 
+
+  const jornadaVazia = (dadosJornada.length <= 1 || (dadosJornada.length === 2 && !dadosJornada[1][0]));
+
+  let listaUnified = [];
+
+  if (jornadaVazia) { 
+    for (let i = 1; i < dadosClientes.length; i++) {
+      let id = dadosClientes[i][idxId].toString().trim();
+      if (!id) continue;
+      let c = dadosClientes[i];
+      let faseFinal = c[idxFase].toString().replace(/Fly$/i, "Flying");
+      let cnpj = idxCNPJ !== -1 ? c[idxCNPJ].toString().trim() : "";
+      listaUnified.push([id, c[idxNome], c[idxCS], faseFinal, c[idxMRR], c[idxLider], cnpj]);
+    }
+  } else {
+    let mapaClientes = {};
+    for (let i = 1; i < dadosClientes.length; i++) {
+      let id = dadosClientes[i][idxId].toString().trim();
+      let cnpj = idxCNPJ !== -1 ? dadosClientes[i][idxCNPJ].toString().trim() : "";
+      if (id) mapaClientes[id] = { nome: dadosClientes[i][idxNome], cs: dadosClientes[i][idxCS], fase: dadosClientes[i][idxFase], mrr: dadosClientes[i][idxMRR], lider: dadosClientes[i][idxLider], cnpj: cnpj };
+    }
+
+    const fasesIncluir = ["mayday", "alert", "en route", "fly", "flying", "onboarding", "retomada"];
+    const excluir = ["cancelado", "tratativa de cancelamento"];
+
+    for (let j = 1; j < dadosJornada.length; j++) {
+      let celula = dadosJornada[j][0].toString();
+      if (!celula) continue;
+      let texto = celula.toLowerCase();
+
+      if (excluir.some(termo => texto.includes(termo))) continue;
+      if (!fasesIncluir.some(termo => texto.includes(termo))) continue;
+
+      let match = celula.match(/"(\d+)"\s*$/);
+      if (match && mapaClientes[match[1]]) {
+        let c = mapaClientes[match[1]];
+        let faseFinal = c.fase.toString().replace(/Fly$/i, "Flying");
+        listaUnified.push([match[1], c.nome, c.cs, faseFinal, c.mrr, c.lider, c.cnpj]);
+      }
+    }
+  }
+
+  abaUnificados.clear().getRange(1, 1, 1, 7).setValues([["ID Original", "Cliente", "CS", "Fase", "MRR", "Lider Ongoing", "CNPJ"]]).setFontWeight("bold").setBackground("#E0E0E0");
+  if (listaUnified.length > 0) abaUnificados.getRange(2, 1, listaUnified.length, 7).setValues(listaUnified);
+}
+
+/**
+ * ETAPA 2: DISTRIBUIÇÃO E PROCESSAMENTO
+ */
+function distribuirCarteiras(modo, parametro) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+  const abaUnificados = ss.getSheetByName("Dados Unificados");
+  const abaCarteiraFinal = ss.getSheetByName("Carteira Final");
+  
+  ss.toast("Equilibrando MRR e gerando painéis...", "Etapa 2", -1);
+  SpreadsheetApp.flush();
+
+  const clientes = abaUnificados.getDataRange().getValues().slice(1);
+  let analistasAtuais = [...new Set(clientes.map(c => c[2]).filter(cs => cs !== ""))];
+  
+  let analistasAlvo = [];
+  let clientesParaDistribuir = [];
+  let clientesFixos = [];
+
+  if (modo === "CRIAR") {
+    analistasAlvo = [...analistasAtuais, ...parametro.novos];
+    clientesParaDistribuir = clientes;
+  } 
+  else if (modo === "DISSOLVER") {
+    analistasAlvo = parametro.receber;
+    clientes.forEach(c => parametro.sair.includes(c[2]) ? clientesParaDistribuir.push(c) : clientesFixos.push(c));
+  } 
+  else if (modo === "MISTO") {
+    analistasAlvo = [...parametro.receber, ...parametro.novos];
+    clientes.forEach(c => parametro.sair.includes(c[2]) ? clientesParaDistribuir.push(c) : clientesFixos.push(c));
+  }
+
+  if (analistasAlvo.length === 0) {
+    return ui.alert("Erro", "Nenhum analista de destino selecionado para receber os clientes.", ui.ButtonSet.OK);
+  }
+
+  let stats = {};
+  let todosAnalistas = new Set([...analistasAtuais, ...analistasAlvo]);
+  todosAnalistas.forEach(n => stats[n] = { mayday: 0, alert: 0, enroute: 0, flying: 0, total: 0, mrr: 0 });
+
+  clientesFixos.forEach(c => {
+    let analista = c[2];
+    let f = c[3].toString().toLowerCase();
+    if (f.includes("mayday")) stats[analista].mayday++;
+    else if (f.includes("alert")) stats[analista].alert++;
+    else if (f.includes("en route")) stats[analista].enroute++;
+    else if (f.includes("flying")) stats[analista].flying++;
+    stats[analista].total++;
+    stats[analista].mrr += (parseFloat(c[4]) || 0);
+  });
+
+  clientesParaDistribuir.sort((a, b) => (parseFloat(b[4]) || 0) - (parseFloat(a[4]) || 0));
+  let resultadoExibicao = [["ID ORIGINAL", "CLIENTE", "NOVO ANALISTA", "LÍDER ONGOING", "FASE", "MRR", "CNPJ"]];
+
+  clientesParaDistribuir.forEach((cliente, i) => {
+    let turno = Math.floor(i / analistasAlvo.length);
+    let dir = i % analistasAlvo.length;
+    let idxA = (turno % 2 === 0) ? dir : (analistasAlvo.length - 1 - dir);
+    let analistaDestino = analistasAlvo[idxA];
+    let analistaOriginal = cliente[2];
+
+    if (analistaDestino !== analistaOriginal) {
+      resultadoExibicao.push([cliente[0], cliente[1], analistaDestino, cliente[5], cliente[3], cliente[4], cliente[6]]);
+    }
+
+    let f = cliente[3].toString().toLowerCase();
+    if (f.includes("mayday")) stats[analistaDestino].mayday++;
+    else if (f.includes("alert")) stats[analistaDestino].alert++;
+    else if (f.includes("en route")) stats[analistaDestino].enroute++;
+    else if (f.includes("flying")) stats[analistaDestino].flying++;
+    stats[analistaDestino].total++;
+    stats[analistaDestino].mrr += (parseFloat(cliente[4]) || 0);
+  });
+
+  abaCarteiraFinal.clear().clearFormats();
+  if (resultadoExibicao.length > 1) {
+    abaCarteiraFinal.getRange(1, 1, resultadoExibicao.length, 7).setValues(resultadoExibicao); 
+    abaCarteiraFinal.getRange(1, 1, 1, 7).setFontWeight("bold").setBackground("#444444").setFontColor("white");
+    abaCarteiraFinal.getRange(2, 6, resultadoExibicao.length - 1, 1).setNumberFormat("R$ #,##0.00");
+  }
+
+  let resumoData = [["Lista de Analistas", "Mayday", "Alert", "En Route", "Flying", "Total Clientes", "Total MRR"]];
+  Object.keys(stats).sort().forEach(n => {
+    if (stats[n].total > 0 || analistasAlvo.includes(n)) {
+      resumoData.push([n, stats[n].mayday, stats[n].alert, stats[n].enroute, stats[n].flying, stats[n].total, stats[n].mrr]);
+    }
+  });
+
+  abaCarteiraFinal.getRange(1, 10, resumoData.length, 7).setValues(resumoData);
+  abaCarteiraFinal.getRange(1, 10, 1, 7).setFontWeight("bold").setBackground("#F3F3F3");
+  abaCarteiraFinal.getRange(2, 16, resumoData.length - 1, 1).setNumberFormat("R$ #,##0.00");
+  abaCarteiraFinal.getRange(1, 10, resumoData.length, 7).setBorder(true, true, true, true, true, true);
+  
+  abaCarteiraFinal.setColumnWidth(2, 250); 
+  abaCarteiraFinal.setColumnWidth(3, 150); 
+  abaCarteiraFinal.setColumnWidth(4, 150); 
+  abaCarteiraFinal.setColumnWidth(10, 180); 
+  abaCarteiraFinal.setColumnWidth(16, 120); 
+
+  criarBackupNoDrive(modo);
+
+  const atualizarSense = ui.alert("Integração SenseData", "Deseja atualizar o SenseData com as novas atribuições?", ui.ButtonSet.YES_NO);
+  if (atualizarSense === ui.Button.YES) {
+    processarAtualizacaoSenseData(resultadoExibicao);
+  } else {
+    ss.toast("Processo concluído!", "Finalizado");
+  }
+}
+
+/**
+ * FUNÇÃO DE BACKUP INTELIGENTE (PASTA PADRÃO)
+ */
+function criarBackupNoDrive(modo) {
+  const ID_PASTA_PADRAO = "1ZMJiTnLE66GAFAtn3y7ws7ZOs8UesgY-"; 
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+  const abaCarteiraFinal = ss.getSheetByName("Carteira Final");
+
+  const resposta = ui.alert("Backup", "Deseja salvar uma cópia (backup) no Google Drive?", ui.ButtonSet.YES_NO);
+  if (resposta == ui.Button.NO) return;
+
+  const usuario = Session.getEffectiveUser().getEmail().split("@")[0];
+  const dataHoje = Utilities.formatDate(new Date(), "GMT-3", "dd/MM/yyyy");
+  let prefixo = (modo === "CRIAR") ? "Montagem_carteira" : (modo === "DISSOLVER" ? "Distribuicao_carteira" : "Misto_Carteira");
+
+  const timestamp = Utilities.formatDate(new Date(), "GMT-3", "HH-mm");
+  const nomeArquivo = `${prefixo}(${dataHoje} - Versão ${timestamp} - Executado por ${usuario})`;
+
+  const novoSS = SpreadsheetApp.create(novoSS = SpreadsheetApp.create(nomeArquivo));
+  abaCarteiraFinal.copyTo(novoSS);
+  
+  const sheetPadrao = novoSS.getSheets()[0];
+  if (novoSS.getSheets().length > 1) novoSS.deleteSheet(sheetPadrao);
+
+  try {
+    const arquivo = DriveApp.getFileById(novoSS.getId());
+    const pastaDestino = DriveApp.getFolderById(ID_PASTA_PADRAO);
+    arquivo.moveTo(pastaDestino);
+    ss.toast("Backup salvo na pasta compartilhada!", "Drive", 3);
+  } catch (e) {}
+}
+
+/**
+ * CORE DA API: Sincroniza dados com o SenseData de forma nativa e estruturada
+ */
+function processarAtualizacaoSenseData(clientesAfetados) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+
+  if (clientesAfetados.length <= 1) return ui.alert("Nenhum cliente afetado para sincronizar.");
+  if (!descobrirCombinacaoAutenticacao()) return;
+
+  ss.toast("Mapeando usuários na API...", "Aguarde", -1);
+  SpreadsheetApp.flush();
+  let mapaUsuarios = {};
+  
+  try {
+    let resUsers = safeFetch(SENSE_BASE_URL + "/users?page_size=100", { method: "GET", headers: CONFIG_AUTENTICACAO_VALIDA, muteHttpExceptions: true });
+    if (resUsers.getResponseCode() === 200) {
+      let jsonUsers = JSON.parse(resUsers.getContentText());
+      let listaUsers = jsonUsers.users || jsonUsers.data || jsonUsers.items || jsonUsers;
+      if (Array.isArray(listaUsers)) listaUsers.forEach(u => { mapaUsuarios[u.name.toString().trim().toLowerCase()] = u; });
+    }
+  } catch(err) { return ui.alert("Erro ao ler usuários no SenseData: " + err.message); }
+
+  let totalGeral = clientesAfetados.length - 1;
+  let sincronizados = 0;
+  let listaDeFalhas = []; 
+
+  for (let i = 1; i < clientesAfetados.length; i++) {
+    
+    let pct = Math.round((i / totalGeral) * 100);
+    ss.toast(`Sincronizando cliente ${i} de ${totalGeral}...`, `Progresso: ${pct}%`, -1);
+    SpreadsheetApp.flush(); 
+
+    let idLegacy = clientesAfetados[i][0].toString().trim();
+    let nomeCliente = clientesAfetados[i][1];
+    let nomeNovoCS = clientesAfetados[i][2].toString().trim();
+    let cnpjCliente = clientesAfetados[i][6].toString().trim(); 
+    let dadosCS = mapaUsuarios[nomeNovoCS.toLowerCase()];
+
+    if (!dadosCS) {
+      listaDeFalhas.push(`• Cliente [${nomeCliente}]: O CS '${nomeNovoCS}' não foi encontrado.`);
+      continue; 
+    }
+    if (!cnpjCliente) {
+      listaDeFalhas.push(`• Cliente [${nomeCliente}]: Erro! CNPJ em branco na planilha.`);
+      continue;
+    }
+
+    let referenciaCSUnica = { "id": parseInt(dadosCS.id) };
+    let idInternoSenseData = null;
+
+    // 🎯 PASSO 1: RESOLUÇÃO DE ID VIA CNPJ
+    try {
+      let resBusca = safeFetch(`${SENSE_BASE_URL}/customers?cnpj=${encodeURIComponent(cnpjCliente)}`, { method: "GET", headers: CONFIG_AUTENTICACAO_VALIDA, muteHttpExceptions: true });
+      if (resBusca.getResponseCode() === 200) {
+        let jsonBusca = JSON.parse(resBusca.getContentText());
+        let listaEncontrados = jsonBusca.customers || jsonBusca.data || jsonBusca.items || jsonBusca;
+        if (Array.isArray(listaEncontrados) && listaEncontrados.length > 0) idInternoSenseData = listaEncontrados[0].id; 
+      }
+      if (!idInternoSenseData) {
+        let cnpjLimpo = cnpjCliente.replace(/\D/g, "");
+        if (cnpjLimpo !== cnpjCliente && cnpjLimpo !== "") {
+          let resBuscaLimpo = safeFetch(`${SENSE_BASE_URL}/customers?cnpj=${encodeURIComponent(cnpjLimpo)}`, { method: "GET", headers: CONFIG_AUTENTICACAO_VALIDA, muteHttpExceptions: true });
+          if (resBuscaLimpo.getResponseCode() === 200) {
+            let jsonBuscaLimpo = JSON.parse(resBuscaLimpo.getContentText());
+            let listaLimpo = jsonBuscaLimpo.customers || jsonBuscaLimpo.data || jsonBuscaLimpo.items || jsonBuscaLimpo;
+            if (Array.isArray(listaLimpo) && listaLimpo.length > 0) idInternoSenseData = listaLimpo[0].id;
+          }
+        }
+      }
+    } catch(e) {}
+
+    if (!idInternoSenseData) {
+      listaDeFalhas.push(`• Cliente [${nomeCliente}]: Não localizado na base do SenseData.`);
+      continue;
+    }
+
+    let sucessoCliente = true;
+
+    // 🎯 PASSO 2: ATUALIZAÇÃO DO CLIENTE (Massa/Lote)
+    try {
+      let dataHojeISO = Utilities.formatDate(new Date(), "GMT-3", "yyyy-MM-dd");
+      let payloadCliente = {
+        "customers": [
+          { "id": idInternoSenseData, "id_legacy": idLegacy, "name": nomeCliente, "name_contract": nomeCliente, "dt_register": dataHojeISO, "status": true, "cs": referenciaCSUnica }
+        ]
+      };
+      let resA = safeFetch(`${SENSE_BASE_URL}/customers`, { method: "POST", headers: CONFIG_AUTENTICACAO_VALIDA, payload: JSON.stringify(payloadCliente), muteHttpExceptions: true });
+      if (resA.getResponseCode() >= 300 || resA.getContentText().includes('"errors"')) {
+        sucessoCliente = false;
+        listaDeFalhas.push(`• Cliente [${nomeCliente}]: Erro no lote cadastral. Resposta: ${resA.getContentText()}`);
+      }
+    } catch(e) { sucessoCliente = false; }
+
+    if (!sucessoCliente) continue;
+
+    // 🎯 PASSO 3: REATRIBUIR TAREFAS PENDENTES EM LOTE
+    try {
+      let resTasks = safeFetch(`${SENSE_BASE_URL}/tasks?customer_id=${idInternoSenseData}`, { method: "GET", headers: CONFIG_AUTENTICACAO_VALIDA, muteHttpExceptions: true });
+      if (resTasks.getResponseCode() === 200) {
+        let jsonTasks = JSON.parse(resTasks.getContentText());
+        let listaTasks = jsonTasks.tasks || jsonTasks.data || jsonTasks.items || jsonTasks;
+        
+        if (Array.isArray(listaTasks)) {
+          let listaTasksAlterar = [];
+          let dataHojeISO = Utilities.formatDate(new Date(), "GMT-3", "yyyy-MM-dd");
+          
+          listaTasks.forEach(task => {
+            if (!task.customer || task.customer.id !== idInternoSenseData) return;
+
+            let statusDesc = task.status && task.status.description ? task.status.description.toLowerCase() : "";
+            if (!statusDesc.includes("concluid") && !statusDesc.includes("completed")) {
+              
+              let taskClean = {
+                "id": task.id,
+                "id_legacy": task.id_legacy || ("task_leg_" + task.id),
+                "customer": { "id": idInternoSenseData },
+                "description": task.description || "Tarefa Pendente",
+                "start_date": task.start_date ? task.start_date.split("T")[0] : dataHojeISO,
+                "due_date": task.due_date ? task.due_date.split("T")[0] : dataHojeISO,
+                "type": { "id": task.type && task.type.id ? parseInt(task.type.id) : 11 },
+                "status": { "id": task.status && task.status.id ? parseInt(task.status.id) : 1 },
+                "priority": { "id": task.priority && task.priority.id ? parseInt(task.priority.id) : 2 },
+                "owner": referenciaCSUnica, 
+                "hours_spent": (isNaN(parseInt(task.hours_spent)) || parseInt(task.hours_spent) <= 0) ? 1 : parseInt(task.hours_spent)
+              };
+              
+              listaTasksAlterar.push(taskClean);
+            }
+          });
+          
+          if (listaTasksAlterar.length > 0) {
+            let resUpdateT = safeFetch(`${SENSE_BASE_URL}/tasks`, {
+              method: "POST", 
+              headers: CONFIG_AUTENTICACAO_VALIDA,
+              payload: JSON.stringify({ "tasks": listaTasksAlterar }),
+              muteHttpExceptions: true
+            });
+            if (resUpdateT.getResponseCode() >= 300 || resUpdateT.getContentText().includes('"errors"')) {
+              listaDeFalhas.push(`• Cliente [${nomeCliente}]: Erro ao mover tarefas pendentes em lote. Resposta: ${resUpdateT.getContentText()}`);
+            }
+          }
+        }
+      }
+    } catch(e) {}
+
+    // 🎯 PASSO 4: CRIAR HISTÓRICO DE ALTERAÇÃO EM LOTE 
+    // AGORA COM O ID EXATO CONTROLADO POR VOCÊ E A FRASE EXATA!
+    try {
+      let dataHojeISO = Utilities.formatDate(new Date(), "GMT-3", "yyyy-MM-dd");
+      
+      let payloadNovaTarefa = {
+        "tasks": [
+          {
+            "id_legacy": "hist_" + idInternoSenseData + "_" + new Date().getTime(), 
+            "customer": { "id": idInternoSenseData },
+            
+            // 🎯 USA O SEU CÓDIGO MANUAL DA LINHA 8
+            "type": { "id": ID_TIPO_ALTERACAO_CS }, 
+            
+            "status": { "id": 2 }, 
+            "priority": { "id": 2 }, 
+            "description": "Alteração de CS - " + nomeNovoCS, // 🎯 A descrição/frase perfeita exigida
+            "notes": `Transferência operacional realizada para - ${nomeNovoCS}`,
+            "start_date": dataHojeISO,
+            "due_date": dataHojeISO,
+            "end_date": dataHojeISO + "T00:00:00",
+            "owner": referenciaCSUnica, 
+            "hours_spent": 1 
+          }
+        ]
+      };
+      
+      let resC = safeFetch(`${SENSE_BASE_URL}/tasks`, {
+        method: "POST", 
+        headers: CONFIG_AUTENTICACAO_VALIDA,
+        payload: JSON.stringify(payloadNovaTarefa),
+        muteHttpExceptions: true
+      });
+      
+      let txtC = resC.getContentText();
+      if (resC.getResponseCode() >= 300 || txtC.includes('"errors"')) {
+        listaDeFalhas.push(`• Cliente [${nomeCliente}]: Erro ao gerar histórico em lote. Resposta: ${txtC}`);
+      }
+    } catch(e) {}
+
+    sincronizados++;
+  }
+
+  ss.toast("Sincronização concluída com sucesso!", "Progresso: 100%", 5);
+  SpreadsheetApp.flush();
+  Utilities.sleep(500);
+
+  if (listaDeFalhas.length > 0) {
+    ui.alert(
+      "⚠️ Sincronização Concluída com Alertas",
+      `Clientes processados com sucesso: ${sincronizados} de ${totalGeral}.\n\n` +
+      `Detalhes das pendências detectadas nas atividades:\n\n` +
+      listaDeFalhas.join("\n\n"),
+      ui.ButtonSet.OK
+    );
+  } else {
+    ui.alert("🚀 Sincronização Concluída!", `Sucesso total! Foram atualizados ${sincronizados} clientes, reatribuídas suas tarefas pendentes e gerados os logs de histórico com sucesso!`, ui.ButtonSet.OK);
+  }
+}
+
+/**
+ * 🕵️ A FUNÇÃO ESPIÃ 
+ */
+function espiarTiposDeAtividade() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  
+  if (!descobrirCombinacaoAutenticacao()) {
+    SpreadsheetApp.getUi().alert("Erro", "Falha de autenticação ao conectar na API.", SpreadsheetApp.getUi().ButtonSet.OK);
+    return;
+  }
+  
+  ss.toast("Vasculhando o painel do SenseData...", "Espião Ativado", -1);
+  SpreadsheetApp.flush();
+  
+  try {
+    // 🎯 Força buscar até 300 tipos de atividades de uma vez só (livre de paginação curta)
+    let res = UrlFetchApp.fetch(SENSE_BASE_URL + "/task_types?page_size=300", {
+      method: "GET",
+      headers: CONFIG_AUTENTICACAO_VALIDA,
+      muteHttpExceptions: true
+    });
+    
+    if (res.getResponseCode() === 200) {
+      let json = JSON.parse(res.getContentText());
+      let lista = json.task_types || json.data || json.items || json;
+      
+      if (Array.isArray(lista) && lista.length > 0) {
+        let abaTipos = ss.getSheetByName("Tipos de Atividade") || ss.insertSheet("Tipos de Atividade");
+        abaTipos.clear().clearFormats();
+        
+        let dadosAba = [["ID DO TIPO", "NOME NA TELA (CAPTION)", "CÓDIGO INTERNO (DESCRIPTION)"]];
+        lista.forEach(t => {
+          dadosAba.push([t.id, t.caption || t.name, t.description]);
+        });
+        
+        abaTipos.getRange(1, 1, dadosAba.length, 3).setValues(dadosAba);
+        abaTipos.getRange(1, 1, 1, 3).setFontWeight("bold").setBackground("#444444").setFontColor("white");
+        abaTipos.setColumnWidth(1, 120);
+        abaTipos.setColumnWidth(2, 250);
+        abaTipos.setColumnWidth(3, 200);
+        abaTipos.activate();
+        
+        ss.toast("Tabela de tipos gerada com sucesso! Volte ao editor e preencha a Linha 8.", "Concluído", 10);
+      } else {
+        ss.toast("A API retornou uma lista vazia.", "Aviso", 5);
+      }
+    } else {
+      ss.toast(`Erro HTTP: ${res.getResponseCode()}`, "Falha de API", 5);
+    }
+  } catch (e) {
+    ss.toast(`Erro técnico: ${e.message}`, "Falha de Script", 5);
+  }
+}
+
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu('🚀 Automação CS')
+    .addItem('Rodar Processo Completo', 'executarAutomacaoCompleta')
+    .addItem('🕵️ Ler IDs de Atividades (Aba Nova)', 'espiarTiposDeAtividade')
+    .addToUi();
+}

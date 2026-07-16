@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css" rel="stylesheet">
+    <style>
+      .hidden { display: none; }
+      .progress-bar-fill { transition: width 0.5s ease-in-out; }
+    </style>
+  </head>
+  <body class="bg-gray-100 p-8 font-sans">
+    
+    <div id="toast-container" class="fixed top-5 right-5 z-50 flex flex-col gap-3"></div>
+
+    <div id="custom-modal" class="fixed inset-0 z-50 hidden flex items-center justify-center bg-black bg-opacity-50 transition-opacity">
+      <div class="bg-white rounded-lg shadow-xl max-w-md w-full p-6 mx-4 transform transition-all">
+        <h3 id="modal-title" class="text-xl font-bold text-gray-800 mb-4">Título</h3>
+        <p id="modal-message" class="text-gray-600 mb-8 font-medium">Mensagem</p>
+        <div class="flex justify-end space-x-3">
+          <button id="modal-btn-no" class="px-4 py-2 bg-gray-200 text-gray-800 font-semibold rounded hover:bg-gray-300 transition duration-200">Não</button>
+          <button id="modal-btn-yes" class="px-4 py-2 bg-blue-600 text-white font-semibold rounded hover:bg-blue-700 transition duration-200">Sim</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="max-w-5xl mx-auto bg-white rounded-lg shadow-lg p-8">
+      <h1 class="text-2xl font-bold text-gray-800 mb-6 border-b pb-2">🚀 Manutenção de Carteiras - SenseData</h1>
+      
+      <div id="form-container" class="space-y-6">
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700">Setor</label>
+            <select id="setor" class="mt-1 block w-full p-2 border border-gray-300 rounded-md" onchange="atualizarListaNomes()">
+              <option value="">Selecione...</option>
+              <option value="1">Onboarding</option>
+              <option value="2">Ongoing</option>
+              <option value="3">Adoção</option>
+            </select>
+          </div>
+          
+          <div>
+            <label class="block text-sm font-medium text-gray-700">Time</label>
+            <select id="time" class="mt-1 block w-full p-2 border border-gray-300 rounded-md" onchange="atualizarListaNomes()">
+              <option value="">Selecione...</option>
+              <option value="1">Pequenas Contas</option>
+              <option value="2">Grandes Contas</option>
+            </select>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700">Operação</label>
+            <select id="operacao" class="mt-1 block w-full p-2 border border-gray-300 rounded-md" onchange="mostrarCamposDinamicos()">
+              <option value="">Selecione...</option>
+              <option value="1">➕ Montar novas carteiras</option>
+              <option value="2">🗑️ Desfazer carteiras</option>
+              <option value="3">🔄 Trocas Pontuais</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="campos-pontual" class="hidden bg-blue-50 p-5 rounded-md border border-blue-200">
+          <h3 class="font-semibold text-blue-800 mb-2">🔄 Configuração de Troca Pontual</h3>
+          <label class="block text-sm text-gray-700">IDs Legacy dos Clientes (separados por ponto e vírgula):</label>
+          <input type="text" id="ids_pontual" class="w-full p-2 mt-1 border rounded-md" placeholder="Ex: 1234; 5678">
+          
+          <label class="block text-sm text-gray-700 mt-3">Analista que vai receber:</label>
+          <select id="destino_pontual" class="w-full p-2 mt-1 border rounded-md bg-white">
+            <option value="">Selecione o Setor e o Time acima...</option>
+          </select>
+        </div>
+
+        <div id="campos-montar" class="hidden bg-green-50 p-5 rounded-md border border-green-200">
+          <h3 class="font-semibold text-green-800 mb-2">➕ Configuração de Nova Carteira</h3>
+          <label class="block text-sm text-gray-700">Nomes dos NOVOS analistas (que vão entrar na equipe):</label>
+          <input type="text" id="nomes_montar" class="w-full p-2 mt-1 border rounded-md" placeholder="Ex: Thamyne Santos; Ana Onofre">
+        </div>
+
+        <div id="campos-desfazer" class="hidden bg-red-50 p-5 rounded-md border border-red-200">
+          <h3 class="font-semibold text-red-800 mb-2">🗑️ Configuração de Dissolução</h3>
+          <label class="block text-sm text-gray-700">Analista que está SAINDO (que perderá os clientes):</label>
+          <select id="nome_saindo" class="w-full p-2 mt-1 border rounded-md bg-white" onchange="atualizarCheckboxReceptores()">
+            <option value="">Selecione o Setor e o Time acima...</option>
+          </select>
+          
+          <label class="block text-sm text-gray-700 mt-4">Analistas que vão RECEBER a carteira:</label>
+          <div id="lista_recebedores" class="grid grid-cols-1 md:grid-cols-3 gap-2 bg-white p-3 border rounded-md min-h-[50px]">
+            <p class="text-sm text-gray-400 italic col-span-3">Selecione o Setor e o Time acima...</p>
+          </div>
+        </div>
+
+        <button onclick="validarEConfirmar()" class="w-full bg-blue-600 text-white font-bold py-3 px-4 rounded hover:bg-blue-700 transition duration-300">
+          Iniciar Processamento em Nuvem
+        </button>
+      </div>
+
+      <div id="loading-screen" class="hidden py-12 max-w-lg mx-auto">
+        <h2 class="text-2xl font-bold text-gray-800 text-center mb-2">Processando Automação...</h2>
+        <p id="loading-text" class="text-center text-gray-600 mb-6 font-medium">Iniciando conexão com o SenseData...</p>
+        
+        <div class="w-full bg-gray-200 rounded-full h-6 mb-4 overflow-hidden border border-gray-300 shadow-inner">
+          <div id="progress-bar" class="bg-blue-600 h-6 rounded-full text-xs font-bold text-white text-center leading-6 transition-all duration-500 ease-out" style="width: 0%">0%</div>
+        </div>
+      </div>
+
+      <div id="result-screen" class="hidden mt-8 space-y-8">
+        <div class="bg-green-100 border-l-4 border-green-500 text-green-700 p-4 rounded">
+          <p class="font-bold text-lg">✅ Sucesso Total!</p>
+        </div>
+        <div>
+          <h3 class="text-lg font-bold text-gray-800 mb-3 border-b pb-2">📊 Relatório: Carteira Final Balanceada</h3>
+          <div class="overflow-x-auto rounded-lg shadow">
+            <table class="min-w-full bg-white border" id="tabela-carteira">
+              <thead class="bg-gray-800 text-white"></thead>
+              <tbody class="text-gray-700 text-sm"></tbody>
+            </table>
+          </div>
+        </div>
+        <div>
+          <h3 class="text-lg font-bold text-gray-800 mb-3 border-b pb-2">📋 Detalhamento: Transferências Individuais</h3>
+          <div class="overflow-x-auto rounded-lg shadow">
+            <table class="min-w-full bg-white border" id="tabela-afetados">
+              <thead class="bg-gray-200 text-gray-800 border-b-2 border-gray-300"></thead>
+              <tbody class="text-gray-700 text-sm"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="text-center mt-6">
+          <button onclick="resetarPainel()" class="bg-gray-600 text-white font-bold py-2 px-6 rounded hover:bg-gray-700 transition duration-300">Nova Operação</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      let monitoramentoInterval;
+
+      // ==========================================
+      // NOTIFICAÇÕES TOAST E MODAL CUSTOMIZADO
+      // ==========================================
+      function mostrarToast(mensagem, tipo = 'erro') {
+        const container = document.getElementById('toast-container');
+        const toast = document.createElement('div');
+        const bgCor = tipo === 'erro' ? 'bg-red-600' : 'bg-green-600';
+        const icone = tipo === 'erro' ? '❌' : '✅';
+        toast.className = `${bgCor} text-white px-6 py-4 rounded-lg shadow-lg flex items-center space-x-3 transform transition-all duration-300 translate-x-full opacity-0`;
+        toast.innerHTML = `<span class="text-xl">${icone}</span><span class="font-medium text-sm">${mensagem}</span>`;
+        container.appendChild(toast);
+        setTimeout(() => toast.classList.remove('translate-x-full', 'opacity-0'), 10);
+        setTimeout(() => { toast.classList.add('translate-x-full', 'opacity-0'); setTimeout(() => toast.remove(), 300); }, 5000);
+      }
+
+      function mostrarModal(titulo, mensagem, textoSim, textoNao, acaoSim, acaoNao) {
+        document.getElementById('modal-title').innerText = titulo;
+        document.getElementById('modal-message').innerText = mensagem;
+        
+        const btnYes = document.getElementById('modal-btn-yes');
+        const btnNo = document.getElementById('modal-btn-no');
+        
+        btnYes.innerText = textoSim;
+        btnNo.innerText = textoNao;
+        
+        btnYes.onclick = () => { fecharModal(); if(acaoSim) acaoSim(); };
+        btnNo.onclick = () => { fecharModal(); if(acaoNao) acaoNao(); };
+        
+        document.getElementById('custom-modal').classList.remove('hidden');
+      }
+
+      function fecharModal() {
+        document.getElementById('custom-modal').classList.add('hidden');
+      }
+
+      // ==========================================
+      // LÓGICA DE TELA E RESET
+      // ==========================================
+      
+      // 🎯 NOVA FUNÇÃO: Reseta a interface para uma nova operação sem recarregar a aba
+      function resetarPainel() {
+        // Esconde os resultados
+        document.getElementById('result-screen').classList.add('hidden');
+        
+        // Zera a barra de progresso visualmente para a próxima vez
+        document.getElementById('progress-bar').style.width = '0%';
+        document.getElementById('progress-bar').innerText = '0%';
+        document.getElementById('loading-text').innerText = 'Iniciando conexão com o SenseData...';
+
+        // Mostra o formulário de volta mantendo o que ele já tinha selecionado
+        document.getElementById('form-container').classList.remove('hidden');
+        
+        // Opcional: Se quiser limpar apenas os campos de preenchimento (IDs, etc)
+        document.getElementById('ids_pontual').value = '';
+        document.getElementById('nomes_montar').value = '';
+        
+        // Se a tela de checkboxes existir, desmarca todos por garantia
+        document.querySelectorAll('#lista_recebedores input[type="checkbox"]').forEach(cb => cb.checked = false);
+
+        mostrarToast("Painel pronto para uma nova operação.", "sucesso");
+      }
+
+      function mostrarCamposDinamicos() {
+        const op = document.getElementById('operacao').value;
+        document.getElementById('campos-pontual').classList.add('hidden');
+        document.getElementById('campos-montar').classList.add('hidden');
+        document.getElementById('campos-desfazer').classList.add('hidden');
+        if (op === "1") document.getElementById('campos-montar').classList.remove('hidden');
+        if (op === "2") document.getElementById('campos-desfazer').classList.remove('hidden');
+        if (op === "3") document.getElementById('campos-pontual').classList.remove('hidden');
+      }
+
+      function atualizarListaNomes() {
+        const setor = document.getElementById('setor').value;
+        const time = document.getElementById('time').value;
+        if (!setor || (setor !== "3" && !time)) return; 
+        document.getElementById('destino_pontual').innerHTML = '<option>⏳ Buscando...</option>';
+        document.getElementById('nome_saindo').innerHTML = '<option>⏳ Buscando...</option>';
+        google.script.run.withSuccessHandler(montarDropdowns).withFailureHandler(erro => mostrarToast(erro.message, 'erro')).obterListaDeAnalistas(setor, time);
+      }
+
+      function montarDropdowns(resposta) {
+        if(resposta.erro) { mostrarToast(resposta.erro, 'erro'); return; }
+        let nomes = resposta.nomes; let options = '<option value="">-- Selecione --</option>'; let checkboxes = '';
+        if (nomes.length === 0) { options = '<option value="">Nenhum analista encontrado</option>'; } 
+        else {
+          nomes.forEach(nome => {
+            options += `<option value="${nome}">${nome}</option>`;
+            checkboxes += `
+              <label class="inline-flex items-center receptor-cb" data-nome="${nome}">
+                <input type="checkbox" value="${nome}" class="form-checkbox h-4 w-4 text-blue-600 rounded">
+                <span class="ml-2 text-sm text-gray-700 truncate">${nome}</span>
+              </label>
+            `;
+          });
+        }
+        document.getElementById('destino_pontual').innerHTML = options;
+        document.getElementById('nome_saindo').innerHTML = options;
+        document.getElementById('lista_recebedores').innerHTML = checkboxes;
+      }
+
+      function atualizarCheckboxReceptores() {
+        const saindo = document.getElementById('nome_saindo').value;
+        document.querySelectorAll('.receptor-cb').forEach(label => {
+          const checkbox = label.querySelector('input');
+          if (checkbox.value === saindo) { checkbox.checked = false; label.style.display = 'none'; } 
+          else { label.style.display = 'inline-flex'; }
+        });
+      }
+
+      // ==========================================
+      // EXECUÇÃO E REQUISIÇÕES
+      // ==========================================
+      function escutarProgresso() {
+        google.script.run.withSuccessHandler(res => {
+          if (res) {
+            document.getElementById('progress-bar').style.width = res.pct + '%';
+            document.getElementById('progress-bar').innerText = res.pct + '%';
+            document.getElementById('loading-text').innerText = res.msg;
+          }
+        }).obterProgressoAtual();
+      }
+
+      function validarEConfirmar() {
+        const setor = document.getElementById('setor').value;
+        const time = document.getElementById('time').value;
+        const operacao = document.getElementById('operacao').value;
+
+        if (!setor || (setor !== "3" && !time) || !operacao) { 
+          mostrarToast("Por favor, preencha Setor, Time e Operação.", 'erro'); 
+          return; 
+        }
+
+        // 1ª Pergunta no Modal Personalizado
+        mostrarModal(
+          "📊 Confirmação Final",
+          "Processamento pronto. Deseja efetivar a alteração de dono e tarefas no SenseData?",
+          "Sim, Efetivar",
+          "Cancelar",
+          () => {
+            // Se clicou SIM, faz a 2ª Pergunta
+            mostrarModal(
+              "💾 Cópia de Segurança",
+              "Deseja salvar um arquivo de cópia (backup COMPLETO) na pasta do Google Drive?",
+              "Sim, salvar backup",
+              "Não, apenas processar",
+              () => iniciarProcessamento(true),  // Sim pro Backup
+              () => iniciarProcessamento(false)  // Não pro Backup
+            );
+          },
+          null // Se cancelar a 1ª pergunta
+        );
+      }
+
+      function iniciarProcessamento(salvarBackupNoDrive) {
+        const checkboxesMarcados = document.querySelectorAll('#lista_recebedores input[type="checkbox"]:checked');
+        const nomesRecebedoresStr = Array.from(checkboxesMarcados).map(cb => cb.value).join(';');
+        
+        const payload = {
+          setor: document.getElementById('setor').value, 
+          time: document.getElementById('time').value,
+          operacao: document.getElementById('operacao').value, 
+          ids_pontual: document.getElementById('ids_pontual').value,
+          destino_pontual: document.getElementById('destino_pontual').value, 
+          nomes_montar: document.getElementById('nomes_montar').value,
+          nome_saindo: document.getElementById('nome_saindo').value, 
+          nomes_recebedores: nomesRecebedoresStr,
+          backup_drive: salvarBackupNoDrive
+        };
+        
+        document.getElementById('form-container').classList.add('hidden');
+        document.getElementById('loading-screen').classList.remove('hidden');
+        
+        document.getElementById('progress-bar').style.width = '0%';
+        document.getElementById('progress-bar').innerText = '0%';
+
+        monitoramentoInterval = setInterval(escutarProgresso, 1500);
+
+        google.script.run
+          .withSuccessHandler(exibirResultados)
+          .withFailureHandler(exibirErro)
+          .receberComandosDoPainel(payload);
+      }
+
+      function exibirResultados(resposta) {
+        clearInterval(monitoramentoInterval);
+        document.getElementById('progress-bar').style.width = '100%';
+        document.getElementById('progress-bar').innerText = '100%';
+
+        setTimeout(() => {
+          document.getElementById('loading-screen').classList.add('hidden');
+          document.getElementById('result-screen').classList.remove('hidden');
+          mostrarToast("Operação finalizada com sucesso!", "sucesso");
+          
+          let hCart = "<tr>"; resposta.carteira[0].forEach(h => hCart += `<th class="py-3 px-4 text-left font-bold">${h}</th>`); hCart += "</tr>";
+          document.querySelector('#tabela-carteira thead').innerHTML = hCart;
+          let bCart = "";
+          for(let i = 1; i < resposta.carteira.length; i++) {
+            bCart += "<tr class='border-b hover:bg-gray-50'>";
+            resposta.carteira[i].forEach(cell => bCart += `<td class="py-2 px-4">${cell}</td>`);
+            bCart += "</tr>";
+          }
+          document.querySelector('#tabela-carteira tbody').innerHTML = bCart;
+
+          let hAfet = "<tr>"; resposta.afetados[0].forEach(h => hAfet += `<th class="py-3 px-4 text-left font-bold">${h}</th>`); hAfet += "</tr>";
+          document.querySelector('#tabela-afetados thead').innerHTML = hAfet;
+          let bAfet = "";
+          for(let i = 1; i < resposta.afetados.length; i++) {
+            bAfet += "<tr class='border-b hover:bg-gray-50'>";
+            resposta.afetados[i].forEach(cell => bAfet += `<td class="py-2 px-4">${cell}</td>`);
+            bAfet += "</tr>";
+          }
+          document.querySelector('#tabela-afetados tbody').innerHTML = bAfet;
+        }, 800);
+      }
+
+      function exibirErro(erro) {
+        clearInterval(monitoramentoInterval);
+        mostrarToast(erro.message, 'erro');
+        document.getElementById('loading-screen').classList.add('hidden');
+        document.getElementById('form-container').classList.remove('hidden');
+      }
+    </script>
+  </body>
+</html>

@@ -1,0 +1,1018 @@
+// =========================================================================
+// CONFIGURAÇÕES GLOBAIS DA API (Ambiente de Produção)
+// =========================================================================
+const TOKEN_ORIGINAL = "  "; 
+const TOKEN_DECODIFICADO = "b1da6033adc26d52f0bdf4356e6d2e0a"; 
+const SENSE_BASE_URL = "https://api.sensedata.io/v2"; 
+
+const ID_TIPO_ALTERACAO_CS = 21; 
+const EMAIL_REMETENTE_AUTOMACAO = "lembrete@acessorias.com";
+const ID_PASTA_RAIZ_BACKUP = "1S9XOF1VRFyQw1kNgA2G40dQBbnoJtTSM";
+let CONFIG_AUTENTICACAO_VALIDA = null; 
+// =========================================================================
+
+/**
+ * 📊 BARRA DE PROGRESSO VISUAL
+ */
+function mostrarProgresso(pct, mensagem) {
+  try {
+    CacheService.getUserCache().put('progresso_automacao', pct + '|' + mensagem, 300);
+    let ss = SpreadsheetApp.getActiveSpreadsheet();
+    if (ss) {
+      ss.toast(mensagem, `⏳ Progresso: [${pct}%]`, -1);
+      SpreadsheetApp.flush();
+    }
+  } catch(e) {}
+}
+
+/**
+ * FUNÇÃO DE ENVIO SEGURO
+ */
+function safeFetch(url, options) {
+  let tentativas = 0;
+  let res = null;
+  while (tentativas < 3) {
+    try {
+      res = UrlFetchApp.fetch(url, options);
+      if (res.getResponseCode() === 429) {
+        let tempoEspera = 10; 
+        try {
+          let json = JSON.parse(res.getContentText());
+          if (json.errors && json.errors[0] && json.errors[0].reset) tempoEspera = parseInt(json.errors[0].reset) + 2; 
+        } catch(e) {}
+        mostrarProgresso("API", `API cheia. Pausando ${tempoEspera}s...`);
+        Utilities.sleep(tempoEspera * 1000);
+        tentativas++;
+      } else {
+        return res; 
+      }
+    } catch (err) {
+      if (tentativas === 2) throw err;
+      Utilities.sleep(2000);
+      tentativas++;
+    }
+  }
+  return res;
+}
+
+/**
+ * SCANNER DE AUTENTICAÇÃO
+ */
+function descobrirCombinacaoAutenticacao() {
+  if (CONFIG_AUTENTICACAO_VALIDA) return true;
+  const combinacoes = [
+    { label: "Bearer + Token Original", headers: { "Authorization": "Bearer " + TOKEN_ORIGINAL, "Content-Type": "application/json" } },
+    { label: "Bearer + Token Decodificado", headers: { "Authorization": "Bearer " + TOKEN_DECODIFICADO, "Content-Type": "application/json" } },
+    { label: "X-SenseData-Token + Token Original", headers: { "X-SenseData-Token": TOKEN_ORIGINAL, "Content-Type": "application/json" } },
+    { label: "X-SenseData-Token + Token Decodificado", headers: { "X-SenseData-Token": TOKEN_DECODIFICADO, "Content-Type": "application/json" } }
+  ];
+  for (let i = 0; i < combinacoes.length; i++) {
+    try {
+      let res = UrlFetchApp.fetch(SENSE_BASE_URL + "/customers?page_size=1", { method: "GET", headers: combinacoes[i].headers, muteHttpExceptions: true });
+      if (res.getResponseCode() === 200) {
+        CONFIG_AUTENTICACAO_VALIDA = combinacoes[i].headers;
+        return true;
+      }
+    } catch(e) {}
+  }
+  return false;
+}
+
+/**
+ * CONSUMIDOR DE API PAGINADA
+ */
+function buscarDadosPaginadosAPI(endpoint) {
+  let resultadoTotal = [];
+  let paginaAtual = 1;
+  let temMaisPaginas = true;
+  const separador = endpoint.includes("?") ? "&" : "?";
+  while (temMaisPaginas) {
+    let urlCompleta = SENSE_BASE_URL + endpoint + separador + "page_size=100&page=" + paginaAtual;
+    let res = safeFetch(urlCompleta, { method: "GET", headers: CONFIG_AUTENTICACAO_VALIDA, muteHttpExceptions: true });
+    
+    if (res && res.getResponseCode() === 200) {
+      let json = JSON.parse(res.getContentText());
+      let lote = json.customers || json.users || json.tasks || json.data || json.items || [];
+      if (Array.isArray(json)) lote = json;
+      
+      if (lote.length === 0) {
+        temMaisPaginas = false;
+      } else {
+        resultadoTotal = resultadoTotal.concat(lote);
+        paginaAtual++;
+        if (json.next_page === null || !json.next_page) temMaisPaginas = false;
+      }
+    } else {
+      temMaisPaginas = false;
+    }
+  }
+  return resultadoTotal;
+}
+
+/**
+ * INÍCIO DO PROCESSO COM LOOP DE NAVEGAÇÃO
+ */
+function executarAutomacaoCompleta() {
+  const ui = SpreadsheetApp.getUi();
+  if (!descobrirCombinacaoAutenticacao()) return ui.alert("❌ Erro Crítico", "O SenseData recusou as chaves de acesso.", ui.ButtonSet.OK);
+  let telaAtual = "SETOR", setorEscolhido = "", timeEscolhido = "", profileAlvo = "", acaoEscolhida = "";
+  let nomeSetorTxt = "";
+  while (telaAtual !== "CONCLUIDO" && telaAtual !== "CANCELADO") {
+    if (telaAtual === "SETOR") {
+      const promptSetor = ui.prompt("🚀 Passo 1: Setor", "Selecione o setor:\n\n1) Onboarding\n2) Ongoing\n3) Adoção\n\nDigite a opção:", ui.ButtonSet.OK_CANCEL);
+      if (promptSetor.getSelectedButton() !== ui.Button.OK) { telaAtual = "CANCELADO"; break; }
+      setorEscolhido = promptSetor.getResponseText().trim();
+      
+      if (setorEscolhido === "1") { telaAtual = "TIME"; nomeSetorTxt = "Onboarding"; }
+      else if (setorEscolhido === "2") { telaAtual = "TIME"; nomeSetorTxt = "Ongoing"; }
+      else if (setorEscolhido === "3") { profileAlvo = "Analista Ongoing - Adoção"; nomeSetorTxt = "Adoção"; telaAtual = "OPERACAO"; } 
+      else ui.alert("Opção inválida.");
+    }
+    else if (telaAtual === "TIME") {
+      const promptTime = ui.prompt("🚀 Passo 2: Time", "Selecione o time:\n\n1) Pequenas Contas\n2) Grandes Contas\n\n0) ↩️ Voltar\n\nDigite a opção:", ui.ButtonSet.OK_CANCEL);
+      if (promptTime.getSelectedButton() !== ui.Button.OK) { telaAtual = "CANCELADO"; break; }
+      timeEscolhido = promptTime.getResponseText().trim();
+      if (timeEscolhido === "0") telaAtual = "SETOR"; 
+      else if (timeEscolhido === "1" || timeEscolhido === "2") {
+        if (setorEscolhido === "2" && timeEscolhido === "1") profileAlvo = "Analista Ongoing";
+        else if (setorEscolhido === "2" && timeEscolhido === "2") profileAlvo = "Analista Ongoing - GC";
+        else if (setorEscolhido === "1" && timeEscolhido === "1") profileAlvo = "Analista Onboarding";
+        else if (setorEscolhido === "1" && timeEscolhido === "2") profileAlvo = "Analista Onboarding - GC";
+        telaAtual = "OPERACAO"; 
+      } else ui.alert("Opção inválida.");
+    }
+    else if (telaAtual === "OPERACAO") {
+      const promptAcao = ui.prompt("🛠️ Passo Final", "Menu de Operações:\n\n1) ➕ Montar novas carteiras\n2) 🗑️ Desfazer carteiras\n3) 🔄 Trocas Pontuais\n\n0) ↩️ Voltar\n\nDigite a opção:", ui.ButtonSet.OK_CANCEL);
+      if (promptAcao.getSelectedButton() !== ui.Button.OK) { telaAtual = "CANCELADO"; break; }
+      acaoEscolhida = promptAcao.getResponseText().trim();
+      if (acaoEscolhida === "0") telaAtual = (setorEscolhido === "3") ? "SETOR" : "TIME";
+      else if (acaoEscolhida === "1" || acaoEscolhida === "2" || acaoEscolhida === "3") telaAtual = "CONCLUIDO";
+      else ui.alert("Opção inválida.");
+    }
+  }
+  if (telaAtual === "CONCLUIDO") {
+    if (acaoEscolhida === "1") rotinaMontarNovasCarteiras(profileAlvo, nomeSetorTxt);
+    else if (acaoEscolhida === "2") rotinaDesfazerCarteiras(profileAlvo, nomeSetorTxt);
+    else if (acaoEscolhida === "3") rotinaTrocasPontuais(profileAlvo, nomeSetorTxt);
+  } else {
+    SpreadsheetApp.getActiveSpreadsheet().toast("Painel fechado.", "Automação", 3);
+  }
+}
+
+/**
+ * 🔄 OPÇÃO 3: TROCAS PONTUAIS
+ */
+function rotinaTrocasPontuais(profileAlvo, nomeSetorTxt) {
+  const ui = SpreadsheetApp.getUi();
+  const promptIds = ui.prompt("Trocas Pontuais", "Digite o(s) ID(s) ORIGINAL(IS) separados por ';' (Max. 5):", ui.ButtonSet.OK_CANCEL);
+  if (promptIds.getSelectedButton() !== ui.Button.OK) return;
+  const listaIds = promptIds.getResponseText().split(";").map(id => id.trim()).filter(id => id !== "");
+  
+  if (listaIds.length === 0) return ui.alert("Nenhum ID inserido.");
+  if (listaIds.length > 5) return ui.alert("Aceita no máximo 5 clientes.");
+  mostrarProgresso(10, "Localizando clientes...");
+  let clientesParaMover = [];
+  listaIds.forEach(id => {
+    let res = safeFetch(SENSE_BASE_URL + "/customers?id_legacy=" + encodeURIComponent(id), { method: "GET", headers: CONFIG_AUTENTICACAO_VALIDA, muteHttpExceptions: true });
+    if (res && res.getResponseCode() === 200) {
+      let json = JSON.parse(res.getContentText());
+      let lote = json.customers || json.data || [];
+      if (lote.length > 0) clientesParaMover.push(lote[0]);
+      else {
+        let res2 = safeFetch(SENSE_BASE_URL + "/customers/" + id, { method: "GET", headers: CONFIG_AUTENTICACAO_VALIDA, muteHttpExceptions: true });
+        if (res2 && res2.getResponseCode() === 200) clientesParaMover.push(JSON.parse(res2.getContentText()));
+      }
+    }
+  });
+  if (clientesParaMover.length === 0) return ui.alert("Nenhum dos IDs informados foi localizado.");
+  mostrarProgresso(20, "Buscando lista de analistas...");
+  let todosUsuarios = buscarDadosPaginadosAPI("/users");
+  let usuariosTime = todosUsuarios.filter(u => u.active && u.profile && u.profile.name === profileAlvo);
+  if (usuariosTime.length === 0) return ui.alert("Nenhum analista ativo localizado.");
+  let txtListaAlvo = usuariosTime.map((u, idx) => (idx + 1) + ") " + u.name).join("\n");
+  const promptDestino = ui.prompt("Destinatário", "Número do analista que vai RECEBER:\n\n" + txtListaAlvo, ui.ButtonSet.OK_CANCEL);
+  if (promptDestino.getSelectedButton() !== ui.Button.OK) return;
+  let idxDestino = parseInt(promptDestino.getResponseText().trim()) - 1;
+  if (isNaN(idxDestino) || !usuariosTime[idxDestino]) return ui.alert("Seleção inválida.");
+  let analistaDestino = usuariosTime[idxDestino];
+  let novasCarteirasDistribuidas = {};
+  novasCarteirasDistribuidas[analistaDestino.name] = clientesParaMover;
+  processarEfetivacaoLote(novasCarteirasDistribuidas, "PONTUAL", profileAlvo, null, todosUsuarios, nomeSetorTxt, null);
+}
+
+/**
+ * ➕ OPÇÃO 1: MONTAR NOVAS CARTEIRAS
+ */
+function rotinaMontarNovasCarteiras(profileAlvo, nomeSetorTxt) {
+  const ui = SpreadsheetApp.getUi();
+  const promptQuant = ui.prompt("Montagem", "Quantas carteiras montar?", ui.ButtonSet.OK_CANCEL);
+  if (promptQuant.getSelectedButton() !== ui.Button.OK) return;
+  const quantNovos = parseInt(promptQuant.getResponseText().trim());
+  if (isNaN(quantNovos) || quantNovos <= 0) return ui.alert("Inválido.");
+  
+  const promptNomes = ui.prompt("Montagem", "Nomes (separe por ';'):", ui.ButtonSet.OK_CANCEL);
+  if (promptNomes.getSelectedButton() !== ui.Button.OK) return;
+  const novosAnalistas = promptNomes.getResponseText().split(";").map(n => n.trim()).filter(n => n !== "");
+  
+  mostrarProgresso(10, "Buscando usuários...");
+  let todosUsuarios = buscarDadosPaginadosAPI("/users");
+  let listaNomesNoBanco = todosUsuarios.map(u => u.name.toLowerCase());
+  let errosGrafia = novosAnalistas.filter(nome => !listaNomesNoBanco.includes(nome.toLowerCase()));
+  if (errosGrafia.length > 0) return ui.alert("Erro de Grafia", "Os seguintes analistas não existem:\n" + errosGrafia.join("\n"), ui.ButtonSet.OK);
+  
+  let usuariosTime = todosUsuarios.filter(u => u.active && u.profile && u.profile.name === profileAlvo);
+
+  let nomesNovosLower = novosAnalistas.map(n => n.toLowerCase());
+  usuariosTime = usuariosTime.filter(u => !nomesNovosLower.includes(u.name.toLowerCase()));
+
+  let nomesTimeAntigo = usuariosTime.map(u => u.name.toLowerCase());
+  
+  mostrarProgresso(25, "Sincronizando carteiras ativas (Nuvem)...");
+  let todosClientes = buscarDadosPaginadosAPI("/customers"); 
+  
+  mostrarProgresso(35, "Filtrando carteiras do time...");
+  let clientesAtivosTime = todosClientes.filter(c => {
+    let statusDesc = c.status && c.status.description ? c.status.description.toLowerCase() : "";
+    let donoNome = c.cs && c.cs.name ? c.cs.name.toLowerCase() : "";
+    return !statusDesc.includes("inativ") && nomesTimeAntigo.includes(donoNome);
+  });
+  
+  if (clientesAtivosTime.length === 0) return ui.alert("Nenhum cliente ativo para este time.");
+  
+  mostrarProgresso(45, "Mapeando travas de segurança de 60 dias...");
+  let sessentaDiasAtras = new Date(new Date().getTime() - (60 * 24 * 60 * 60 * 1000));
+  let idsBloqueados60Dias = new Set();
+  
+  try {
+    let paginaT = 1;
+    let continuarLendoTasks = true;
+    while (continuarLendoTasks) {
+      let resT = safeFetch(SENSE_BASE_URL + "/tasks?type_id=" + ID_TIPO_ALTERACAO_CS + "&page_size=100&page=" + paginaT, { method: "GET", headers: CONFIG_AUTENTICACAO_VALIDA, muteHttpExceptions: true });
+      if (resT && resT.getResponseCode() === 200) {
+        let jsonT = JSON.parse(resT.getContentText());
+        let listaT = jsonT.tasks || jsonT.data || [];
+        if (listaT.length === 0) {
+          continuarLendoTasks = false;
+        } else {
+          let algumaTaskNaJanela = false;
+          listaT.forEach(t => {
+            if (t.end_date) {
+              let dataTask = new Date(t.end_date.split("T")[0]);
+              if (dataTask >= sessentaDiasAtras) {
+                algumaTaskNaJanela = true;
+                if (t.customer && t.customer.id) idsBloqueados60Dias.add(t.customer.id);
+              }
+            }
+          });
+          if (!algumaTaskNaJanela) continuarLendoTasks = false; 
+          paginaT++;
+          if (jsonT.next_page === null || !jsonT.next_page) continuarLendoTasks = false;
+        }
+      } else {
+        continuarLendoTasks = false;
+      }
+    }
+  } catch(e) {}
+  
+  let totalGeralAtivos = clientesAtivosTime.length;
+  let contagemTotalPorSaude = { "mayday": 0, "alert": 0, "en route": 0, "flying": 0 };
+  
+  clientesAtivosTime.forEach(c => {
+    let f = (c.stage || "").toLowerCase();
+    if (f.includes("mayday")) contagemTotalPorSaude["mayday"]++;
+    else if (f.includes("alert")) contagemTotalPorSaude["alert"]++;
+    else if (f.includes("route")) contagemTotalPorSaude["en route"]++;
+    else contagemTotalPorSaude["flying"]++;
+  });
+  let porcenSaude = {
+    "mayday": contagemTotalPorSaude["mayday"] / totalGeralAtivos,
+    "alert": contagemTotalPorSaude["alert"] / totalGeralAtivos,
+    "en route": contagemTotalPorSaude["en route"] / totalGeralAtivos,
+    "flying": contagemTotalPorSaude["flying"] / totalGeralAtivos
+  };
+  let contagemAtuais = {};
+  usuariosTime.forEach(u => contagemAtuais[u.name.toLowerCase()] = 0);
+  clientesAtivosTime.forEach(c => {
+    let d = c.cs.name.toLowerCase();
+    if (contagemAtuais[d] !== undefined) contagemAtuais[d]++;
+  });
+  novosAnalistas.forEach(nome => { contagemAtuais[nome.toLowerCase()] = 0; });
+  
+  let totalAnalistasFinal = usuariosTime.length + novosAnalistas.length;
+  let metaClientesPorCarteira = Math.floor(totalGeralAtivos / totalAnalistasFinal);
+  let metasDeSaudePorNovoCS = {
+    "mayday": Math.round(metaClientesPorCarteira * porcenSaude["mayday"]),
+    "alert": Math.round(metaClientesPorCarteira * porcenSaude["alert"]),
+    "en route": Math.round(metaClientesPorCarteira * porcenSaude["en route"]),
+    "flying": Math.round(metaClientesPorCarteira * porcenSaude["flying"])
+  };
+  let novasCarteiras = {};
+  novosAnalistas.forEach(nome => { novasCarteiras[nome] = []; });
+  ["mayday", "alert", "en route", "flying"].forEach(s => {
+    let cotaNecessariaPorCS = metasDeSaudePorNovoCS[s];
+    
+    novosAnalistas.forEach(nomeNovo => {
+      let tentativas = 0;
+      let colhidos = 0;
+      while (colhidos < cotaNecessariaPorCS) {
+        let poolClientesStatus = clientesAtivosTime.filter(c => {
+          let f = (c.stage || "").toLowerCase();
+          let atendeStatus = false;
+          if (s === "mayday" && f.includes("mayday")) atendeStatus = true;
+          else if (s === "alert" && f.includes("alert")) atendeStatus = true;
+          else if (s === "en route" && f.includes("route")) atendeStatus = true;
+          else if (s === "flying" && !f.includes("mayday") && !f.includes("alert") && !f.includes("route")) atendeStatus = true;
+          
+          let donoNome = c.cs.name.toLowerCase();
+          return atendeStatus && nomesTimeAntigo.includes(donoNome);
+        });
+        if (poolClientesStatus.length === 0) break;
+        poolClientesStatus.sort((a, b) => contagemAtuais[b.cs.name.toLowerCase()] - contagemAtuais[a.cs.name.toLowerCase()]);
+        
+        let clienteCandidato = null;
+        if (tentativas === 0) {
+          clienteCandidato = poolClientesStatus.find(c => !idsBloqueados60Dias.has(c.id));
+        }
+        
+        if (!clienteCandidato) {
+          clienteCandidato = poolClientesStatus[0];
+        }
+        if (!clienteCandidato) break;
+        novasCarteiras[nomeNovo].push(clienteCandidato);
+        
+        let donoAntigoTxt = clienteCandidato.cs.name.toLowerCase();
+        contagemAtuais[donoAntigoTxt]--;
+        contagemAtuais[nomeNovo.toLowerCase()]++;
+        
+        let idxRem = clientesAtivosTime.indexOf(clienteCandidato);
+        if (idxRem > -1) clientesAtivosTime.splice(idxRem, 1);
+        colhidos++;
+        tentativas++;
+      }
+    });
+  });
+  processarEfetivacaoLote(novasCarteiras, "CRIAR", profileAlvo, todosClientes, todosUsuarios, nomeSetorTxt, null);
+}
+
+/**
+ * 🗑️ OPÇÃO 2: DESFAZER CARTEIRAS
+ */
+function rotinaDesfazerCarteiras(profileAlvo, nomeSetorTxt) {
+  const ui = SpreadsheetApp.getUi();
+  mostrarProgresso(10, "Buscando usuários...");
+  let todosUsuarios = buscarDadosPaginadosAPI("/users");
+  let usuariosTime = todosUsuarios.filter(u => u.active && u.profile && u.profile.name === profileAlvo);
+  if (usuariosTime.length === 0) return ui.alert("Nenhum analista ativo localizado com esse perfil.");
+  
+  const promptSair = ui.prompt("Dissolução", "Selecione quem está SAINDO da empresa:\n\n" + usuariosTime.map((u, i) => (i + 1) + ") " + u.name).join("\n"), ui.ButtonSet.OK_CANCEL);
+  if (promptSair.getSelectedButton() !== ui.Button.OK) return;
+  let idxSair = parseInt(promptSair.getResponseText().trim()) - 1;
+  let analistaSaindo = usuariosTime[idxSair];
+  if (!analistaSaindo) return ui.alert("Seleção inválida.");
+  
+  let analistasReceptores = usuariosTime.filter((_, idx) => idx !== idxSair);
+  if (analistasReceptores.length === 0) return ui.alert("Não há analistas restantes para herdar a carteira.");
+  
+  mostrarProgresso(25, "Sincronizando carteiras ativas (Nuvem)...");
+  let todosClientes = buscarDadosPaginadosAPI("/customers"); 
+  
+  mostrarProgresso(40, "Isolando carteira do analista selecionado...");
+  let carteiraOrfa = todosClientes.filter(c => {
+    let statusDesc = c.status && c.status.description ? c.status.description.toLowerCase() : "";
+    return !statusDesc.includes("inativ") && c.cs && c.cs.id === analistaSaindo.id;
+  });
+  
+  if (carteiraOrfa.length === 0) return ui.alert("A carteira selecionada já está vazia ou inativa.");
+
+  mostrarProgresso(55, "Mapeando carteiras atuais dos receptores por saúde...");
+  let contagemReceptores = {};
+  analistasReceptores.forEach(r => {
+    contagemReceptores[r.name.toLowerCase()] = { "mayday": 0, "alert": 0, "en route": 0, "flying": 0, "total": 0 };
+  });
+
+  todosClientes.forEach(c => {
+    let statusDesc = c.status && c.status.description ? c.status.description.toLowerCase() : "";
+    if (statusDesc.includes("inativ")) return;
+    if (!c.cs || !c.cs.name) return;
+    let donoKey = c.cs.name.toLowerCase();
+    if (contagemReceptores[donoKey] === undefined) return;
+
+    let f = (c.stage || "").toLowerCase();
+    if (f.includes("mayday")) contagemReceptores[donoKey]["mayday"]++;
+    else if (f.includes("alert")) contagemReceptores[donoKey]["alert"]++;
+    else if (f.includes("route")) contagemReceptores[donoKey]["en route"]++;
+    else contagemReceptores[donoKey]["flying"]++;
+    contagemReceptores[donoKey]["total"]++;
+  });
+
+  mostrarProgresso(70, "Agrupando carteira órfã por saúde...");
+  let orfaosPorSaude = { "mayday": [], "alert": [], "en route": [], "flying": [] };
+  carteiraOrfa.forEach(c => {
+    let f = (c.stage || "").toLowerCase();
+    if (f.includes("mayday")) orfaosPorSaude["mayday"].push(c);
+    else if (f.includes("alert")) orfaosPorSaude["alert"].push(c);
+    else if (f.includes("route")) orfaosPorSaude["en route"].push(c);
+    else orfaosPorSaude["flying"].push(c);
+  });
+
+  let novasDistribuicoes = {}; 
+  analistasReceptores.forEach(r => novasDistribuicoes[r.name] = []);
+
+  mostrarProgresso(80, "Distribuindo proporcionalmente por quantidade e saúde...");
+  ["mayday", "alert", "en route", "flying"].forEach(s => {
+    orfaosPorSaude[s].forEach(cliente => {
+      analistasReceptores.sort((a, b) => {
+        let cA = contagemReceptores[a.name.toLowerCase()];
+        let cB = contagemReceptores[b.name.toLowerCase()];
+        if (cA[s] !== cB[s]) return cA[s] - cB[s];
+        return cA.total - cB.total;
+      });
+
+      let escolhido = analistasReceptores[0];
+      novasDistribuicoes[escolhido.name].push(cliente);
+
+      contagemReceptores[escolhido.name.toLowerCase()][s]++;
+      contagemReceptores[escolhido.name.toLowerCase()]["total"]++;
+    });
+  });
+  
+  processarEfetivacaoLote(novasDistribuicoes, "DISSOLVER", profileAlvo, todosClientes, todosUsuarios, nomeSetorTxt, analistaSaindo.name);
+}
+
+/**
+ * 🚀 MOTOR CENTRAL
+ * 
+ * PONTUAL: cálculo por DELTAS puros (nenhuma chamada de API pós-processamento).
+ *          Mostra na Carteira Final os +/- de cada envolvido (não os totais absolutos).
+ * 
+ * CRIAR / DISSOLVER: usa o snapshot já carregado (baseClientesInteira) + deltas
+ *                    para mostrar totais absolutos atualizados dos envolvidos.
+ *                    Também sem nenhuma API pós-processamento.
+ */
+function processarEfetivacaoLote(mapaDistribuicao, modoOperacao, profileAlvo, baseClientesInteira, todosUsuarios, nomeSetorTxt, nomeAnalistaExcluido, overrideBackupDrive = null) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  
+  // 🎯 LIMPEZA IMEDIATA das abas
+  const abaAfetados = ss.getSheetByName("Clientes Afetados") || ss.insertSheet("Clientes Afetados");
+  const abaCarteiraFinal = ss.getSheetByName("Carteira Final") || ss.insertSheet("Carteira Final");
+  abaAfetados.clear();
+  abaAfetados.clearContents();
+  abaAfetados.clearFormats();
+  abaCarteiraFinal.clear();
+  abaCarteiraFinal.clearContents();
+  abaCarteiraFinal.clearFormats();
+  SpreadsheetApp.flush();
+
+  try {
+    let ui = SpreadsheetApp.getUi();
+    if (ui && overrideBackupDrive === null) { 
+      const confirmarAPI = ui.alert("Confirmação Final", "Processamento em nuvem pronto. Deseja efetivar no SenseData?", ui.ButtonSet.YES_NO);
+      if (confirmarAPI !== ui.Button.YES) return mostrarProgresso(0, "Cancelado.");
+    }
+  } catch(e) {}
+
+  mostrarProgresso(55, "Preparando pacotes de dados...");
+
+  let dicionarioUsuarios = {};
+  todosUsuarios.forEach(u => { dicionarioUsuarios[u.name.toLowerCase()] = u; });
+
+  let logsPlanilhaAfetados = [];
+  let deltasPainel = []; 
+  let rMudancas = {}; 
+  let dataProcessamento = Utilities.formatDate(new Date(), "GMT-3", "dd/MM/yyyy HH:mm");
+  let dataHojeISO = Utilities.formatDate(new Date(), "GMT-3", "yyyy-MM-dd");
+
+  let pacoteCustomers = [];
+  let staticHistoryTasks = [];
+  let clientesParaBuscarTasks = [];
+  let pacotesEmailsParaEnviar = [];
+
+  Object.keys(mapaDistribuicao).forEach(nomeDigitado => {
+    let listaClientes = mapaDistribuicao[nomeDigitado];
+    if (listaClientes.length === 0) return;
+    
+    let dadosUsuarioDestino = dicionarioUsuarios[nomeDigitado.toLowerCase()];
+    if (!dadosUsuarioDestino) return;
+
+    let nomeCanonicoOficial = dadosUsuarioDestino.name;
+    let referenciaCSUnica = { "id": parseInt(dadosUsuarioDestino.id) };
+    let corpoEmailLista = "";
+
+    listaClientes.forEach(cliente => {
+      let analistaAntigo = cliente.cs && cliente.cs.name ? cliente.cs.name : "Nenhum";
+      let csmNome = cliente.csm && cliente.csm.name ? cliente.csm.name : "Nenhum";
+      let faseCliente = (cliente.stage || "flying").toLowerCase();
+      
+      let idLegacySeguro = cliente.id_legacy ? cliente.id_legacy.toString() : cliente.id.toString();
+      let nomeSeguro = cliente.name ? cliente.name : "Cliente " + cliente.id;
+      let nomeContratoSeguro = cliente.name_contract ? cliente.name_contract : nomeSeguro;
+      let dataRegistroSegura = cliente.dt_register ? cliente.dt_register.split("T")[0] : dataHojeISO;
+
+      pacoteCustomers.push({ 
+        "id": cliente.id, "id_legacy": idLegacySeguro, "name": nomeSeguro, "name_contract": nomeContratoSeguro,
+        "dt_register": dataRegistroSegura, "status": { "id": 1 }, "cs": referenciaCSUnica 
+      });
+      
+      staticHistoryTasks.push({
+        "id_legacy": "hist_" + cliente.id + "_" + new Date().getTime(), 
+        "customer": { "id": cliente.id },
+        "type": { "id": ID_TIPO_ALTERACAO_CS }, 
+        "status": { "id": 2 }, 
+        "priority": { "id": 2 }, 
+        "description": "Alteração de CS - " + nomeCanonicoOficial, 
+        "notes": "Transferência operacional para - " + nomeCanonicoOficial,
+        "start_date": dataHojeISO, "due_date": dataHojeISO, "end_date": dataHojeISO + "T00:00:00", 
+        "owner": referenciaCSUnica, "hours_spent": 1 
+      });
+
+      clientesParaBuscarTasks.push({ "id": cliente.id, "refCS": referenciaCSUnica });
+      logsPlanilhaAfetados.push([dataProcessamento, idLegacySeguro, nomeSeguro, cliente.cnpj || "", analistaAntigo, nomeCanonicoOficial, cliente.stage || "Flying", csmNome]);
+      
+      deltasPainel.push({ de: analistaAntigo, para: nomeCanonicoOficial, fase: faseCliente });
+      rMudancas[cliente.id] = nomeCanonicoOficial;
+      corpoEmailLista += idLegacySeguro + " - " + nomeSeguro + "\n";
+    });
+
+    if (dadosUsuarioDestino.email) {
+      pacotesEmailsParaEnviar.push({
+        to: dadosUsuarioDestino.email,
+        subject: "Atualização de CS - SenseData",
+        body: nomeCanonicoOficial + ", os clientes abaixo foram atribuídos a você no SenseData:\n\n" + corpoEmailLista
+      });
+    }
+  });
+
+  mostrarProgresso(65, "Atualizando SenseData (Carteiras)...");
+  for (let i = 0; i < pacoteCustomers.length; i += 100) {
+    let pedaco = pacoteCustomers.slice(i, i + 100);
+    let resPost = safeFetch(SENSE_BASE_URL + "/customers", { method: "POST", headers: CONFIG_AUTENTICACAO_VALIDA, payload: JSON.stringify({ "customers": pedaco }), muteHttpExceptions: true });
+    if (resPost && resPost.getResponseCode() >= 300) {
+      try{ let ui = SpreadsheetApp.getUi(); if(ui) ui.alert("⚠️ Falha ao Atualizar Cliente no SenseData!", "Erro: " + resPost.getContentText(), ui.ButtonSet.OK); }catch(e){}
+      return mostrarProgresso(0, "Interrompido.");
+    }
+  }
+
+  mostrarProgresso(75, "Gerando atividades de histórico...");
+  for (let i = 0; i < staticHistoryTasks.length; i += 100) {
+    let pedaco = staticHistoryTasks.slice(i, i + 100);
+    let resTask = safeFetch(SENSE_BASE_URL + "/tasks", { method: "POST", headers: CONFIG_AUTENTICACAO_VALIDA, payload: JSON.stringify({ "tasks": pedaco }), muteHttpExceptions: true });
+    if (resTask && resTask.getResponseCode() >= 300) {
+      try{ let ui = SpreadsheetApp.getUi(); if(ui) ui.alert("⚠️ Falha ao Criar Atividade!", "Erro: " + resTask.getContentText(), ui.ButtonSet.OK); }catch(e){}
+    }
+  }
+
+  mostrarProgresso(85, "Reatribuindo tarefas pendentes (A laser)...");
+  let pacoteUpdateTasks = [];
+  clientesParaBuscarTasks.forEach(c => {
+    try {
+      let resTasks = safeFetch(SENSE_BASE_URL + "/tasks?customer:id=" + c.id, { method: "GET", headers: CONFIG_AUTENTICACAO_VALIDA, muteHttpExceptions: true });
+      if (resTasks && resTasks.getResponseCode() === 200) {
+        let jsonTasks = JSON.parse(resTasks.getContentText());
+        let listaTasks = jsonTasks.tasks || jsonTasks.data || [];
+        
+        if (Array.isArray(listaTasks)) {
+          listaTasks.forEach(task => {
+            if (!task.customer || task.customer.id !== c.id) return;
+            let statusId = task.status && task.status.id ? task.status.id : null;
+            let statusDesc = task.status && task.status.description ? task.status.description.toLowerCase() : "";
+            let isClosed = (statusId === 2) || statusDesc.includes("conclu") || statusDesc.includes("completed");
+            if (!isClosed) {
+              pacoteUpdateTasks.push({ "id": task.id, "owner": c.refCS });
+            }
+          });
+        }
+      }
+    } catch(e) {}
+  });
+
+  for (let i = 0; i < pacoteUpdateTasks.length; i += 100) {
+    let pedaco = pacoteUpdateTasks.slice(i, i + 100);
+    let resPatch = safeFetch(SENSE_BASE_URL + "/tasks", { method: "PATCH", headers: CONFIG_AUTENTICACAO_VALIDA, payload: JSON.stringify({ "tasks": pedaco }), muteHttpExceptions: true });
+    if (resPatch && resPatch.getResponseCode() >= 300 && resPatch.getResponseCode() !== 202) {
+      try{ let ui = SpreadsheetApp.getUi(); if(ui) ui.alert("⚠️ Falha ao atualizar tarefas pendentes!", "Erro: " + resPatch.getContentText(), ui.ButtonSet.OK); }catch(e){}
+    }
+  }
+
+  mostrarProgresso(92, "Disparando notificações por e-mail...");
+  pacotesEmailsParaEnviar.forEach(email => { try { MailApp.sendEmail(email); } catch(e){} });
+
+  // ========================================================================
+  // 🎯 PÓS-PROCESSAMENTO — sem nenhuma chamada de API
+  // ========================================================================
+  mostrarProgresso(95, "Preenchendo abas...");
+
+  // Limpeza reforçada antes de escrever
+  abaAfetados.clear();
+  abaAfetados.clearContents();
+  abaAfetados.clearFormats();
+  abaCarteiraFinal.clear();
+  abaCarteiraFinal.clearContents();
+  abaCarteiraFinal.clearFormats();
+  SpreadsheetApp.flush();
+
+  // Preenche "Clientes Afetados" (mesmo comportamento para as três operações)
+  let cabecalhosAfetados = [["Data Processamento", "ID Original", "Cliente", "CNPJ", "De (CS Antigo)", "Para (CS Novo)", "Fase", "CSM Name"]];
+  abaAfetados.getRange(1, 1, 1, 8).setValues(cabecalhosAfetados).setFontWeight("bold").setBackground("#E0E0E0").setFontColor("black");
+  if (logsPlanilhaAfetados.length > 0) {
+    abaAfetados.getRange(2, 1, logsPlanilhaAfetados.length, 8).setValues(logsPlanilhaAfetados);
+  }
+  abaAfetados.setColumnWidth(1, 130); 
+  abaAfetados.setColumnWidth(3, 230); 
+  abaAfetados.setColumnWidth(4, 150);
+
+  // Identifica envolvidos (doadores + receptores)
+  let envolvidosSet = new Set();
+  deltasPainel.forEach(d => {
+    if (d.de && d.de !== "Nenhum") envolvidosSet.add(d.de.toLowerCase());
+    if (d.para && d.para !== "Nenhum") envolvidosSet.add(d.para.toLowerCase());
+  });
+  if (nomeAnalistaExcluido) {
+    envolvidosSet.delete(nomeAnalistaExcluido.toLowerCase());
+  }
+
+  // Prepara caixinhas
+  let statsEnvolvidos = {};
+  envolvidosSet.forEach(nomeLower => {
+    statsEnvolvidos[nomeLower] = { 
+      mayday: 0, alert: 0, "en route": 0, flying: 0, total: 0,
+      nomeReal: nomeLower
+    };
+  });
+  todosUsuarios.forEach(u => {
+    let nLower = u.name.toLowerCase();
+    if (statsEnvolvidos[nLower]) statsEnvolvidos[nLower].nomeReal = u.name;
+  });
+
+  let matrizCarteiraFinal;
+
+  if (modoOperacao === "PONTUAL") {
+    // 🎯 MODO PONTUAL — só deltas puros, sem snapshot, sem API
+    // Aplica cada troca: doador -1, receptor +1 na saúde correspondente
+    deltasPainel.forEach(d => {
+      let deKey = d.de ? d.de.toLowerCase() : "";
+      let paraKey = d.para ? d.para.toLowerCase() : "";
+      let fase = (d.fase || "flying").toLowerCase();
+      let categoria = "flying";
+      if (fase.includes("mayday")) categoria = "mayday";
+      else if (fase.includes("alert")) categoria = "alert";
+      else if (fase.includes("route")) categoria = "en route";
+      
+      if (statsEnvolvidos[deKey]) {
+        statsEnvolvidos[deKey][categoria]--;
+        statsEnvolvidos[deKey].total--;
+      }
+      if (statsEnvolvidos[paraKey]) {
+        statsEnvolvidos[paraKey][categoria]++;
+        statsEnvolvidos[paraKey].total++;
+      }
+    });
+
+    // Monta matriz com sinal (+/-) — a coluna mostra "quanto o analista ganhou ou perdeu nesta operação"
+    let formatarDelta = (n) => n > 0 ? "+" + n : n.toString();
+    matrizCarteiraFinal = [["Analista", "Δ Mayday", "Δ Alert", "Δ En Route", "Δ Flying", "Δ Total"]];
+    Object.keys(statsEnvolvidos)
+      .sort((a, b) => statsEnvolvidos[a].nomeReal.localeCompare(statsEnvolvidos[b].nomeReal))
+      .forEach(key => {
+        let s = statsEnvolvidos[key];
+        matrizCarteiraFinal.push([
+          s.nomeReal, 
+          formatarDelta(s.mayday), 
+          formatarDelta(s.alert), 
+          formatarDelta(s["en route"]), 
+          formatarDelta(s.flying), 
+          formatarDelta(s.total)
+        ]);
+      });
+
+  } else {
+    // 🎯 MODO CRIAR / DISSOLVER — totais absolutos (snapshot já em memória + deltas)
+    // Snapshot: contagem inicial a partir do baseClientesInteira (estado ANTES das mudanças)
+    baseClientesInteira.forEach(c => {
+      let statusDesc = c.status && c.status.description ? c.status.description.toLowerCase() : "";
+      if (statusDesc.includes("inativ")) return;
+      if (!c.cs || !c.cs.name) return;
+      
+      let donoLower = c.cs.name.toLowerCase();
+      if (!statsEnvolvidos[donoLower]) return;
+      
+      let fase = (c.stage || "").toLowerCase();
+      if (fase.includes("mayday")) statsEnvolvidos[donoLower].mayday++;
+      else if (fase.includes("alert")) statsEnvolvidos[donoLower].alert++;
+      else if (fase.includes("route")) statsEnvolvidos[donoLower]["en route"]++;
+      else statsEnvolvidos[donoLower].flying++;
+      statsEnvolvidos[donoLower].total++;
+    });
+
+    // Aplica deltas sobre o snapshot para chegar no estado atual
+    deltasPainel.forEach(d => {
+      let deKey = d.de ? d.de.toLowerCase() : "";
+      let paraKey = d.para ? d.para.toLowerCase() : "";
+      let fase = (d.fase || "flying").toLowerCase();
+      let categoria = "flying";
+      if (fase.includes("mayday")) categoria = "mayday";
+      else if (fase.includes("alert")) categoria = "alert";
+      else if (fase.includes("route")) categoria = "en route";
+      
+      if (statsEnvolvidos[deKey]) {
+        statsEnvolvidos[deKey][categoria] = Math.max(0, statsEnvolvidos[deKey][categoria] - 1);
+        statsEnvolvidos[deKey].total = Math.max(0, statsEnvolvidos[deKey].total - 1);
+      }
+      if (statsEnvolvidos[paraKey]) {
+        statsEnvolvidos[paraKey][categoria]++;
+        statsEnvolvidos[paraKey].total++;
+      }
+    });
+
+    matrizCarteiraFinal = [["Lista de Analistas", "Mayday", "Alert", "En Route", "Flying", "Total de Clientes"]];
+    Object.keys(statsEnvolvidos)
+      .sort((a, b) => statsEnvolvidos[a].nomeReal.localeCompare(statsEnvolvidos[b].nomeReal))
+      .forEach(key => {
+        let s = statsEnvolvidos[key];
+        matrizCarteiraFinal.push([s.nomeReal, s.mayday, s.alert, s["en route"], s.flying, s.total]);
+      });
+  }
+
+  // Escreve na Carteira Final
+  abaCarteiraFinal.getRange(1, 1, matrizCarteiraFinal.length, 6).setValues(matrizCarteiraFinal);
+  abaCarteiraFinal.getRange(1, 1, 1, 6).setFontWeight("bold").setBackground("#444444").setFontColor("white");
+  abaCarteiraFinal.getRange(1, 1, matrizCarteiraFinal.length, 6).setBorder(true, true, true, true, true, true);
+  abaCarteiraFinal.setColumnWidth(1, 200);
+  SpreadsheetApp.flush();
+
+  mostrarProgresso(100, "Concluído!");
+
+  // Controle de backup do Drive
+  let desejaFazerBackup = false;
+  if (overrideBackupDrive !== null) {
+    desejaFazerBackup = overrideBackupDrive;
+  } else {
+    try {
+      let ui = SpreadsheetApp.getUi();
+      if (ui) { desejaFazerBackup = (ui.alert("Backup", "Deseja salvar uma cópia no Google Drive?", ui.ButtonSet.YES_NO) === ui.Button.YES); }
+    } catch(e) {}
+  }
+
+  if (desejaFazerBackup) {
+    try {
+      const pastaRaiz = DriveApp.getFolderById(ID_PASTA_RAIZ_BACKUP);
+      let pastaSetorDestino = null;
+      const subPastasExistentes = pastaRaiz.getFoldersByName(nomeSetorTxt);
+      if (subPastasExistentes.hasNext()) {
+        pastaSetorDestino = subPastasExistentes.next();
+      } else {
+        pastaSetorDestino = pastaRaiz.createFolder(nomeSetorTxt);
+      }
+      const usuario = Session.getEffectiveUser().getEmail().split("@")[0] || "Sistema_Web";
+      const dataHoje = Utilities.formatDate(new Date(), "GMT-3", "dd-MM-yyyy"); 
+      const timestamp = Utilities.formatDate(new Date(), "GMT-3", "HH-mm");
+      
+      let nomeArquivoBackup = "";
+      if (modoOperacao === "CRIAR") nomeArquivoBackup = `Montagem de carteira - Data: ${dataHoje} - Executado por (${usuario}) - Vol_${timestamp}`;
+      else if (modoOperacao === "DISSOLVER") nomeArquivoBackup = `Distribuição de carteira - Data: ${dataHoje} - Executado por (${usuario}) - Vol_${timestamp}`;
+      else if (modoOperacao === "PONTUAL") nomeArquivoBackup = `Troca pontual - Data: ${dataHoje} - Executado por (${usuario}) - Vol_${timestamp}`;
+      else { nomeArquivoBackup = `Backup_Segurança - Data: ${dataHoje} - Executado por (${usuario})`; }
+
+      const arquivoClonado = DriveApp.getFileById(ss.getId()).makeCopy(nomeArquivoBackup);
+      arquivoClonado.moveTo(pastaSetorDestino);
+      
+      try { ss.toast(`Cópia salva com sucesso em Backups > ${nomeSetorTxt}!`, "Sucesso", 5); } catch(e){}
+    } catch (e) { console.log("Erro Backup:", e.message); }
+  }
+
+  try {
+    let ui = SpreadsheetApp.getUi();
+    if (ui && overrideBackupDrive === null) {
+      ui.alert("🚀 Sucesso Total!", `Operação finalizada!\n\n• Carteiras niveladas perfeitamente.\n• Saúde distribuída na proporção exata da empresa.\n• Atividades pendentes atualizadas em nuvem.`, ui.ButtonSet.OK);
+    }
+  } catch(e) {}
+}
+
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu('🚀 Automação CS')
+    .addItem('Rodar Processo Completo', 'executarAutomacaoCompleta')
+    .addToUi();
+}
+
+/**
+ * =========================================================================
+ * 🌐 BLOCO DE INTEGRAÇÃO WEB APP (A PORTA DE ENTRADA DO HTML)
+ * =========================================================================
+ */
+
+function doGet() {
+  return HtmlService.createHtmlOutputFromFile('painel')
+      .setTitle('Manutenção de Carteiras - SenseData')
+      .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+function obterProgressoAtual() {
+  let cache = CacheService.getUserCache().get('progresso_automacao');
+  if (!cache) return { pct: 0, msg: "Iniciando processo em nuvem..." };
+  let parts = cache.split('|');
+  return { pct: parseInt(parts[0]), msg: parts[1] };
+}
+
+function obterListaDeAnalistas(setor, time) {
+  try {
+    if (!descobrirCombinacaoAutenticacao()) return { erro: "Falha de Autenticação com o SenseData." };
+    
+    let profileAlvo = "";
+    if (setor === "3") profileAlvo = "Analista Ongoing - Adoção";
+    else {
+      if (setor === "2" && time === "1") profileAlvo = "Analista Ongoing";
+      else if (setor === "2" && time === "2") profileAlvo = "Analista Ongoing - GC";
+      else if (setor === "1" && time === "1") profileAlvo = "Analista Onboarding";
+      else if (setor === "1" && time === "2") profileAlvo = "Analista Onboarding - GC";
+    }
+    
+    if (!profileAlvo) return { erro: "Perfil alvo não identificado." };
+
+    let todosUsuarios = buscarDadosPaginadosAPI("/users");
+    let usuariosTime = todosUsuarios.filter(u => u.active && u.profile && u.profile.name === profileAlvo);
+    return { nomes: usuariosTime.map(u => u.name).sort() };
+  } catch (e) {
+    return { erro: "Erro de comunicação com a API: " + e.message };
+  }
+}
+
+function receberComandosDoPainel(payload) {
+  CacheService.getUserCache().remove('progresso_automacao');
+
+  if (!descobrirCombinacaoAutenticacao()) {
+    throw new Error("O SenseData recusou as chaves de acesso. Verifique as credenciais.");
+  }
+
+  let profileAlvo = "";
+  let nomeSetorTxt = "";
+
+  if (payload.setor === "1") { nomeSetorTxt = "Onboarding"; }
+  else if (payload.setor === "2") { nomeSetorTxt = "Ongoing"; }
+  else if (payload.setor === "3") { profileAlvo = "Analista Ongoing - Adoção"; nomeSetorTxt = "Adoção"; } 
+
+  if (payload.setor !== "3") {
+    if (payload.setor === "2" && payload.time === "1") profileAlvo = "Analista Ongoing";
+    else if (payload.setor === "2" && payload.time === "2") profileAlvo = "Analista Ongoing - GC";
+    else if (payload.setor === "1" && payload.time === "1") profileAlvo = "Analista Onboarding";
+    else if (payload.setor === "1" && payload.time === "2") profileAlvo = "Analista Onboarding - GC";
+  }
+
+  if (payload.operacao === "1") {
+    rotinaMontarNovasCarteirasWEB_Ponte(profileAlvo, nomeSetorTxt, payload.nomes_montar, payload.backup_drive);
+  } else if (payload.operacao === "2") {
+    rotinaDesfazerCarteirasWEB_Ponte(profileAlvo, nomeSetorTxt, payload.nome_saindo, payload.nomes_recebedores, payload.backup_drive);
+  } else if (payload.operacao === "3") {
+    rotinaTrocasPontuaisWEB_Ponte(profileAlvo, nomeSetorTxt, payload.ids_pontual, payload.destino_pontual, payload.backup_drive);
+  }
+
+  SpreadsheetApp.flush();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let abaA = ss.getSheetByName("Clientes Afetados");
+  let abaC = ss.getSheetByName("Carteira Final");
+
+  let dadosAfetados = abaA ? abaA.getDataRange().getDisplayValues() : [["Sem dados"]];
+  let dadosCarteira = abaC ? abaC.getDataRange().getDisplayValues() : [["Sem dados"]];
+
+  return {
+    afetados: dadosAfetados,
+    carteira: dadosCarteira
+  };
+}
+
+/**
+ * 🌉 PONTES ADAPTADORAS DE INPUT
+ */
+function rotinaMontarNovasCarteirasWEB_Ponte(profileAlvo, nomeSetorTxt, nomesMontarRaw, salvarBackup) {
+  let todosUsuarios = buscarDadosPaginadosAPI("/users");
+  let listaNomesNoBanco = todosUsuarios.map(u => u.name.toLowerCase());
+  const novosAnalistas = nomesMontarRaw.split(";").map(n => n.trim()).filter(n => n !== "");
+  let errosGrafia = novosAnalistas.filter(nome => !listaNomesNoBanco.includes(nome.toLowerCase()));
+  if (errosGrafia.length > 0) throw new Error("Analistas não existem: " + errosGrafia.join(", "));
+  
+  let usuariosTime = todosUsuarios.filter(u => u.active && u.profile && u.profile.name === profileAlvo);
+  let nomesNovosLower = novosAnalistas.map(n => n.toLowerCase());
+  usuariosTime = usuariosTime.filter(u => !nomesNovosLower.includes(u.name.toLowerCase()));
+  let nomesTimeAntigo = usuariosTime.map(u => u.name.toLowerCase());
+  let todosClientes = buscarDadosPaginadosAPI("/customers"); 
+  let clientesAtivosTime = todosClientes.filter(c => {
+    let statusDesc = c.status && c.status.description ? c.status.description.toLowerCase() : "";
+    let donoNome = c.cs && c.cs.name ? c.cs.name.toLowerCase() : "";
+    return !statusDesc.includes("inativ") && nomesTimeAntigo.includes(donoNome);
+  });
+  if (clientesAtivosTime.length === 0) throw new Error("Nenhum cliente ativo para este time.");
+  
+  let sessentaDiasAtras = new Date(new Date().getTime() - (60 * 24 * 60 * 60 * 1000));
+  let idsBloqueados60Dias = new Set();
+  try {
+    let paginaT = 1; let continuarLendoTasks = true;
+    while (continuarLendoTasks) {
+      let resT = safeFetch(SENSE_BASE_URL + "/tasks?type_id=" + ID_TIPO_ALTERACAO_CS + "&page_size=100&page=" + paginaT, { method: "GET", headers: CONFIG_AUTENTICACAO_VALIDA, muteHttpExceptions: true });
+      if (resT && resT.getResponseCode() === 200) {
+        let jsonT = JSON.parse(resT.getContentText()); let listaT = jsonT.tasks || jsonT.data || [];
+        if (listaT.length === 0) { continuarLendoTasks = false; } else {
+          let algumaTaskNaJanela = false;
+          listaT.forEach(t => {
+            if (t.end_date) {
+              let dataTask = new Date(t.end_date.split("T")[0]);
+              if (dataTask >= sessentaDiasAtras) { algumaTaskNaJanela = true; if (t.customer && t.customer.id) idsBloqueados60Dias.add(t.customer.id); }
+            }
+          });
+          if (!algumaTaskNaJanela) continuarLendoTasks = false;
+          paginaT++; if (jsonT.next_page === null || !jsonT.next_page) continuarLendoTasks = false;
+        }
+      } else { continuarLendoTasks = false; }
+    }
+  } catch(e) {}
+
+  let clientesDisponiveis = clientesAtivosTime.filter(c => !idsBloqueados60Dias.has(c.id));
+  if (clientesDisponiveis.length === 0) throw new Error("Todos os clientes foram movidos nos últimos 60 dias.");
+  let contagem = {}; usuariosTime.forEach(u => contagem[u.name.toLowerCase()] = 0);
+  clientesDisponiveis.forEach(c => { let d = c.cs.name.toLowerCase(); if (contagem[d] !== undefined) contagem[d]++; });
+  let media = Math.floor(clientesDisponiveis.length / (usuariosTime.length + novosAnalistas.length));
+  if (media <= 0) throw new Error("Clientes insuficientes para dividir.");
+  
+  let saude = { "mayday": [], "alert": [], "en route": [], "flying": [] };
+  clientesDisponiveis.forEach(c => {
+    let f = (c.stage || "").toLowerCase();
+    if (f.includes("mayday")) saude["mayday"].push(c); else if (f.includes("alert")) saude["alert"].push(c);
+    else if (f.includes("route")) saude["en route"].push(c); else saude["flying"].push(c);
+  });
+  let prop = { "mayday": saude.mayday.length / clientesDisponiveis.length, "alert": saude.alert.length / clientesDisponiveis.length, "en route": saude["en route"].length / clientesDisponiveis.length, "flying": saude.flying.length / clientesDisponiveis.length };
+  
+  let novas = {};
+  novosAnalistas.forEach(nome => {
+    novas[nome] = [];
+    ["mayday", "alert", "en route", "flying"].forEach(s => {
+      let cota = Math.round(media * prop[s]);
+      for (let k = 0; k < cota; k++) {
+        if (saude[s].length > 0) {
+          saude[s].sort((a, b) => contagem[b.cs.name.toLowerCase()] - contagem[a.cs.name.toLowerCase()]);
+          let escolhido = saude[s].shift(); novas[nome].push(escolhido); contagem[escolhido.cs.name.toLowerCase()]--;
+        }
+      }
+    });
+  });
+  processarEfetivacaoLote(novas, "CRIAR", profileAlvo, todosClientes, todosUsuarios, nomeSetorTxt, null, salvarBackup);
+}
+
+function rotinaDesfazerCarteirasWEB_Ponte(profileAlvo, nomeSetorTxt, nomeSaindoRaw, receptoresRaw, salvarBackup) {
+  let todosUsuarios = buscarDadosPaginadosAPI("/users");
+  let usuariosTime = todosUsuarios.filter(u => u.active && u.profile && u.profile.name === profileAlvo);
+  let analistaSaindo = usuariosTime.find(u => u.name.toLowerCase() === nomeSaindoRaw.toLowerCase().trim());
+  if (!analistaSaindo) throw new Error("Analista saindo não encontrado no time.");
+  
+  let analistasRestantes = usuariosTime.filter(u => u.id !== analistaSaindo.id);
+  let receptores = analistasRestantes;
+  if (receptoresRaw) {
+    let nomesFiltro = receptoresRaw.split(";").map(n => n.trim().toLowerCase());
+    receptores = analistasRestantes.filter(u => nomesFiltro.includes(u.name.toLowerCase()));
+  }
+  if (receptores.length === 0) throw new Error("Nenhum receptor ativo configurado.");
+  
+  let todosClientes = buscarDadosPaginadosAPI("/customers"); 
+  let carteiraOrfa = todosClientes.filter(c => {
+    let statusDesc = c.status && c.status.description ? c.status.description.toLowerCase() : "";
+    return !statusDesc.includes("inativ") && c.cs && c.cs.id === analistaSaindo.id;
+  });
+  if (carteiraOrfa.length === 0) throw new Error("A carteira selecionada já está vazia ou inativa.");
+  
+  let contagem = {}; receptores.forEach(r => contagem[r.name.toLowerCase()] = 0);
+  todosClientes.forEach(c => {
+    let statusDesc = c.status && c.status.description ? c.status.description.toLowerCase() : "";
+    if (c.cs && !statusDesc.includes("inativ") && contagem[c.cs.name.toLowerCase()] !== undefined) contagem[c.cs.name.toLowerCase()]++;
+  });
+  
+  let novas = {}; receptores.forEach(r => novas[r.name] = []);
+  carteiraOrfa.sort((a, b) => (parseFloat(b.size) || 0) - (parseFloat(a.size) || 0));
+  carteiraOrfa.forEach(cliente => {
+    receptores.sort((a, b) => contagem[a.name.toLowerCase()] - contagem[b.name.toLowerCase()]);
+    let escolhido = receptores[0]; novas[escolhido.name].push(cliente); contagem[escolhido.name.toLowerCase()]++; 
+  });
+  processarEfetivacaoLote(novas, "DISSOLVER", profileAlvo, todosClientes, todosUsuarios, nomeSetorTxt, analistaSaindo.name, salvarBackup);
+}
+
+function rotinaTrocasPontuaisWEB_Ponte(profileAlvo, nomeSetorTxt, idsRaw, destinoRaw, salvarBackup) {
+  const listaIds = idsRaw.split(";").map(id => id.trim()).filter(id => id !== "");
+  if (listaIds.length === 0) throw new Error("Nenhum ID inserido.");
+  let clientesParaMover = [];
+  listaIds.forEach(id => {
+    let res = safeFetch(SENSE_BASE_URL + "/customers?id_legacy=" + encodeURIComponent(id), { method: "GET", headers: CONFIG_AUTENTICACAO_VALIDA, muteHttpExceptions: true });
+    if (res && res.getResponseCode() === 200) {
+      let json = JSON.parse(res.getContentText()); let lote = json.customers || json.data || [];
+      if (lote.length > 0) clientesParaMover.push(lote[0]);
+      else {
+        let res2 = safeFetch(SENSE_BASE_URL + "/customers/" + id, { method: "GET", headers: CONFIG_AUTENTICACAO_VALIDA, muteHttpExceptions: true });
+        if (res2 && res2.getResponseCode() === 200) clientesParaMover.push(JSON.parse(res2.getContentText()));
+      }
+    }
+  });
+  if (clientesParaMover.length === 0) throw new Error("Nenhum dos IDs localizados.");
+  
+  let todosUsuarios = buscarDadosPaginadosAPI("/users");
+  let usuariosTime = todosUsuarios.filter(u => u.active && u.profile && u.profile.name === profileAlvo);
+  let analistaDestino = usuariosTime.find(u => u.name.toLowerCase() === destinoRaw.trim().toLowerCase());
+  if (!analistaDestino) throw new Error("Analista receptor não localizado no time.");
+  
+  let novasCarteirasDistribuidas = {};
+  novasCarteirasDistribuidas[analistaDestino.name] = clientesParaMover;
+  processarEfetivacaoLote(novasCarteirasDistribuidas, "PONTUAL", profileAlvo, null, todosUsuarios, nomeSetorTxt, null, salvarBackup);
+}
